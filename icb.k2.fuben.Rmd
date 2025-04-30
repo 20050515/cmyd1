@@ -1,0 +1,4360 @@
+---
+title: "Multi-microbiome"
+author: "qiao"
+date: "2025-01-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE) 
+library(foreach)
+library(reshape2)
+library(corrplot)
+library(ggplot2)
+library(patchwork)
+library(vegan)
+library(phyloseq)
+library(ggpubr)
+library(microbiome)
+library(pheatmap)
+library(doParallel) 
+```
+
+##预处理
+```{r}
+# 加载所需的R包  
+library(foreach)  
+library(reshape2)  
+library(corrplot)  
+library(ggplot2)  
+library(patchwork)  
+library(vegan)  
+library(phyloseq)  
+library(ggpubr)  
+library(microbiome)  
+library(pheatmap)  
+library(doParallel) 
+library(phyloseq)
+
+# 读取数据  
+otu_s <- read.csv("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rawdata/icb.k2s.csv",header = TRUE, sep = ',', row.names = 1)  
+tax <- read.csv("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rawdata/tax.csv",header = TRUE, sep = ',', row.names = 1)  
+meta <- read.csv("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rawdata/metadata.csv",header = TRUE, sep = ',', row.names = 1, fileEncoding = "UTF-8")  
+colnames(otu_s) <- rownames(meta)  
+
+# 创建phyloseq对象  
+OTU <- otu_table(otu_s, taxa_are_rows = TRUE)  
+TAX <- tax_table(as.matrix(tax))  
+META <- sample_data(meta)  
+s.phyloseq <- phyloseq(OTU, TAX, META)  
+
+# 筛选数据  
+s.great <- subset_samples(s.phyloseq , 
+                           Response != "" &
+                           Host == "Human" &
+                           AssayType == "WGS" & 
+                           k__Archaea > 300 & 
+                           k__Bacteria > 300 &
+                           k__Fungi > 300 & 
+                           k__Viruses > 300)
+
+## 过滤掉流行率小于10%的物种
+sps = filter_taxa(s.great, function(x) sum(x > 0) > (0.1*length(x)), TRUE)
+
+s <- as.data.frame(otu_table(sps))  
+taxonomy <- as.data.frame(tax_table(sps))  
+META <- as.data.frame(sample_data(sps)) 
+META <- data.frame(META) 
+META <- META %>%  
+  mutate(Host_disease = ifelse(Host_disease == "Melonoma", "Melanoma", Host_disease))
+
+ 
+modify_names <- function(otu_name) {  
+  # 分割命名  
+  parts <- unlist(strsplit(otu_name, "\\|"))  
+
+  # 提取界和种  
+  kingdom <- gsub("k__", "", parts[1])  
+
+  # 查找包含种信息的元素  
+  species_index <- grep("^s__", parts)  
+
+  # 如果找到种信息，则提取种名；否则，返回 NA  
+  if (length(species_index) > 0) {  
+    species <- gsub("s__", "", parts[species_index[1]])  
+  } else {  
+    species <- NA  # 或者其他你认为合适的缺失值表示  
+  }  
+
+  # 确定界水平分类简称  
+  kingdom_initial <- switch(kingdom,  
+                             "Archaea" = "A",  
+                             "Bacteria" = "B",  
+                             "Fungi" = "F",  
+                             "Viruses" = "V",  
+                             "")  
+
+  # 生成新的物种名  
+  # 如果 species 是 NA，则返回 "界_Unknown"，否则返回 "界_种"  
+  if (is.na(species)) {  
+    new_name <- paste(kingdom_initial, "Unknown", sep = "_")  
+  } else {  
+    new_name <- paste(kingdom_initial, species, sep = "_")  
+  }  
+  return(new_name)  
+} 
+
+# 获取原始行名  
+original_rownames <- rownames(s)  
+
+# 应用函数修改行名  
+new_rownames <- sapply(original_rownames, modify_names)  
+
+# 创建一个逻辑向量，指示哪些行没有种名  
+rows_to_keep <- new_rownames != "V_" & new_rownames != "A_" & new_rownames != "B_" & new_rownames != "F_"  
+
+# 使用逻辑向量来子集数据框  
+s <- s[rows_to_keep, ]  
+
+# 获取过滤后的行名  
+new_rownames <- new_rownames[rows_to_keep]  
+
+# 使用 make.names() 确保行名的唯一性  
+new_rownames <- make.names(new_rownames, unique = TRUE)  
+
+# 将新的行名赋给数据框  
+rownames(s) <- new_rownames  
+
+# 删除此代码块中间变量  
+rm(original_rownames, rows_to_keep,meta,otu_s,s.great,s.phyloseq,tax)  
+
+```
+
+##wSNF
+```{r pressure, echo=FALSE}
+library("SNFtool")  
+library("vegan")  
+library("reticulate")  
+library("phyloseq")  
+library("microbiome")  
+
+# 1. 找到 Python 解释器的路径，并替换下面的路径  
+# 2. 确保该 Python 环境已经安装了 sklearn 包  
+use_python("/opt/anaconda3/bin/python") # 替换为你找到的 Python 解释器路径  
+# 或者，如果你使用 virtualenv 或 conda environment：  
+# use_virtualenv("your_virtualenv_name") # 或者 use_condaenv("your_condaenv_name")  
+
+source("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/script/function_snf.R")  
+source_python("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/script/sil.py")  
+
+# 假设你的 s 数据框已经存在，并且行是物种名，列是样本名  
+# 假设你的 META 数据框已经存在，并且行是样本，包含 Response 信息  
+
+# 1. Hellinger 转换  
+rel_s <- microbiome::transform(s, "hellinger")  
+
+# 2. 分割数据框  
+arc_rows <- grepl("^A_", rownames(rel_s))  
+bac_rows <- grepl("^B_", rownames(rel_s))  
+fun_rows <- grepl("^F_", rownames(rel_s))  
+vir_rows <- grepl("^V_", rownames(rel_s))  
+
+a_data <- rel_s[arc_rows, ]  
+b_data <- rel_s[bac_rows, ]  
+f_data <- rel_s[fun_rows, ]  
+v_data <- rel_s[vir_rows, ]  
+
+# 3. 检查样本名称是否一致  
+if (!all(colnames(a_data) == colnames(b_data)) ||  
+    !all(colnames(a_data) == colnames(f_data)) ||  
+    !all(colnames(a_data) == colnames(v_data))) {  
+  stop("样本名称不一致，请检查数据！")  
+}
+# 4. 计算 Bray-Curtis 距离  
+a_dsim <- vegdist(t(a_data), method='bray', diag=TRUE, upper=TRUE)  
+b_dsim <- vegdist(t(b_data), method='bray', diag=TRUE, upper=TRUE)  
+f_dsim <- vegdist(t(f_data), method='bray', diag=TRUE, upper=TRUE)  
+v_dsim <- vegdist(t(v_data), method='bray', diag=TRUE, upper=TRUE)  
+
+# 5. Mantel test  
+mantel(a_dsim, f_dsim ,method = "spearman")
+#Mantel statistic based on Spearman's rank correlation rho 
+#Call:
+#mantel(xdis = a_dsim, ydis = f_dsim, method = "spearman") 
+#Mantel statistic r: 0.7181 
+#      Significance: 0.001 
+#Upper quantiles of permutations (null model):
+#   90%    95%  97.5%    99% 
+#0.0297 0.0395 0.0461 0.0527 
+#Permutation: free
+#Number of permutations: 999
+
+mantel(a_dsim, v_dsim ,method = "spearman") 
+#Mantel statistic based on Spearman's rank correlation rho 
+#Call:
+#mantel(xdis = a_dsim, ydis = v_dsim, method = "spearman") 
+#Mantel statistic r: 0.2374 
+#      Significance: 0.001 
+#Upper quantiles of permutations (null model):
+#   90%    95%  97.5%    99% 
+#0.0216 0.0292 0.0348 0.0420 
+#Permutation: free
+#Number of permutations: 999
+
+mantel(b_dsim, f_dsim ,method = "spearman")
+#Mantel statistic based on Spearman's rank correlation rho 
+#Call:
+#mantel(xdis = b_dsim, ydis = f_dsim, method = "spearman") 
+#Mantel statistic r: 0.6354 
+#      Significance: 0.001 
+#Upper quantiles of permutations (null model):
+#   90%    95%  97.5%    99% 
+#0.0288 0.0383 0.0491 0.0563 
+#Permutation: free
+#Number of permutations: 999
+
+mantel(b_dsim, v_dsim ,method = "spearman")
+#Mantel statistic based on Spearman's rank correlation rho 
+#Call:
+#mantel(xdis = b_dsim, ydis = v_dsim, method = "spearman") 
+#Mantel statistic r: 0.3107 
+#      Significance: 0.001 
+#Upper quantiles of permutations (null model):
+#   90%    95%  97.5%    99% 
+#0.0225 0.0302 0.0360 0.0446 
+#Permutation: free
+#Number of permutations: 999
+
+mantel(f_dsim, v_dsim ,method = "spearman") 
+#Mantel statistic based on Spearman's rank correlation rho 
+#Call:
+#mantel(xdis = f_dsim, ydis = v_dsim, method = "spearman") 
+#Mantel statistic r: 0.2369 
+#      Significance: 0.001 
+#Upper quantiles of permutations (null model):
+#   90%    95%  97.5%    99% 
+#0.0258 0.0319 0.0388 0.0485 
+#Permutation: free
+#Number of permutations: 999
+
+# 6. 缺失值处理  
+a_dsim[is.nan(a_dsim)] <- 0  
+b_dsim[is.nan(b_dsim)] <- 0  
+f_dsim[is.nan(f_dsim)] <- 0  
+v_dsim[is.nan(v_dsim)] <- 0  
+
+# 7. 构建相似性矩阵  
+W1 <- (as.matrix(a_dsim) - 1) * -1  
+W2 <- (as.matrix(b_dsim) - 1) * -1  
+W3 <- (as.matrix(f_dsim) - 1) * -1  
+W4 <- (as.matrix(v_dsim) - 1) * -1  
+
+# 8. 权重分配  
+weight_a <- dim(a_data)[2] # 修改为 dim(a_data)[2]，因为列是样本  
+weight_b <- dim(b_data)[2]  
+weight_f <- dim(f_data)[2]  
+weight_v <- dim(v_data)[2]  
+
+weights_snf <- c(weight_a, weight_b, weight_f, weight_v)  
+
+# 9. 多次迭代，构建相似性矩阵w  
+sil_values <- c()  
+for (i in 2:100) {  
+  W <- SNF_weighted_iter(list(W1, W2, W3, W4), i, 20, weight = weights_snf)  
+  z <- estimateNumberOfClustersGivenGraph(W)[[1]]  
+  labels <- spectralClustering(W, z)  
+  
+  # 将 W 转换为 NumPy 数组  
+  W_np <- r_to_py(W)  
+  labels_np <- r_to_py(labels)  
+
+  sil_values <- c(sil_values, silhouette_score(W_np, labels_np))  
+}  
+tuned_k <- which.max(sil_values) + 1  
+print(sil_values)
+# 10. 谱聚类  
+W <- SNF_weighted_iter(list(W1, W2, W3, W4), tuned_k, 20, weight = weights_snf)  
+z <- estimateNumberOfClustersGivenGraph(W)[[1]]  
+labels <- spectralClustering(W, z)  
+print(table(labels))  
+
+# 11. 结果输出  
+lab <- as.data.frame(labels, row.names = colnames(s))  
+
+# 提取 Response 信息  
+lab$response <- META[rownames(lab),]$Response  
+
+t <- table(lab)  
+#labels
+#  1   2 
+#524 441 
+META$Cluster <- lab$labels  
+write.csv(lab, paste("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rawdata", ".csv", sep=''))
+write.csv(META, paste("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rawdata/META", ".csv", sep=''))
+write.csv(W, paste("matrix", ".csv", sep=''))  
+write.csv(t, paste("table", ".csv", sep=''))
+```
+
+
+##聚类热图
+```{r pressure, echo=FALSE}
+library(pheatmap)  
+library(RColorBrewer)  
+library(ComplexHeatmap)  
+library(grid)  
+library(circlize)  
+# 准备数据  
+# 假设您已经运行了之前的 wSNF 聚类代码，并得到了以下变量：  
+# - W: wSNF 融合后的相似性矩阵  
+# - labels: 样本的聚类标签  
+
+# 确保 W 是一个矩阵  
+W <- as.matrix(W)  
+
+# Min-Max 归一化  
+W_min <- min(W, na.rm = TRUE)  # 获取最小值  
+W_max <- max(W, na.rm = TRUE)  # 获取最大值  
+W_normalized <- (W - W_min) / (W_max - W_min)  # 归一化到0-1范围  
+
+# 直接使用归一化后的结果作为相似度矩阵  
+W_transformed <- W_normalized  
+
+# 下面的代码与之前相同，保持不变  
+diag(W_transformed) <- 1  
+
+# 根据聚类标签对样本进行排序  
+cluster_order <- order(labels)  # 获取聚类标签的排序索引  
+W_reordered <- W_transformed[cluster_order, cluster_order]  # 重新排序相似度矩阵  
+labels_reordered <- labels[cluster_order]  # 重新排序聚类标签  
+
+# 创建颜色注释  
+clusters <- as.factor(labels_reordered)  # 使用重新排序的标签  
+num_clusters <- length(unique(clusters))  
+
+# 定义聚类颜色  
+cluster_colors <- c("#990026", "#1e4e8a")  
+names(cluster_colors) <- levels(clusters)  
+
+# 创建 ComplexHeatmap 注释  
+row_annotation <- HeatmapAnnotation(  
+  df = data.frame(Cluster = clusters),  
+  col = list(Cluster = cluster_colors),  
+  which = "row",  
+  show_legend = FALSE,  
+  width = unit(0.5, "cm"),  
+  show_annotation_name = FALSE  # 移除竖轴标签  
+)  
+
+col_annotation <- HeatmapAnnotation(  
+  df = data.frame(Cluster = clusters),  
+  col = list(Cluster = cluster_colors),  
+  which = "column",  
+  show_legend = FALSE,  
+  height = unit(0.5, "cm"),  
+  show_annotation_name = FALSE  # 移除横轴标签  
+)  
+
+# 提取非对角线元素的最小值和最大值  
+non_diag_values <- W_reordered[!diag(TRUE, nrow(W_reordered))]  # 获取非对角线元素  
+min_value <- min(non_diag_values, na.rm = TRUE)  # 获取最小值，去除 NA  
+max_value <- max(non_diag_values, na.rm = TRUE)  # 获取最大值，去除 NA  
+
+# 定义热图颜色梯度，反转为最大值到最小值的顺序  
+heatmap_breaks <- seq(max_value, min_value, length.out = 10)  # 使用非对角线元素的最大最小值作为断点  
+heatmap_colors <- colorRamp2(heatmap_breaks,   
+                              c("#6a0624", "#8b0824", "#7bc2bc",  
+                                "#feab88", "#fbd2bc", "#c7e0ed",  
+                                "#0fafd2", "#327db7", "#134b87", "#053061"))  
+
+# 绘制 ComplexHeatmap 热图  
+ht_name <- "Min-Max Normalized W"  # 修改热图标题  
+ht <- Heatmap(  
+  W_reordered,  
+  cluster_rows = FALSE,  
+  cluster_columns = FALSE,  
+  show_row_names = FALSE,  
+  show_column_names = FALSE,  
+  col = heatmap_colors,  
+  name = ht_name,  
+  top_annotation = col_annotation,  # 添加横轴颜色条  
+  left_annotation = row_annotation,  
+  show_heatmap_legend = TRUE,  # 显示热图图例  
+  heatmap_legend_param = list(  
+    title = "Similarity",  
+    legend_height = unit(4, "cm")  
+  ),  
+  rect_gp = gpar(col = "white", lwd = 0),  # 移除热图单元格之间的分割线  
+  use_raster = FALSE,  # 禁用栅格化，确保框线清晰  
+  border = TRUE, # 显示热图边框  
+  cell_fun = function(j, i, x, y, width, height, fill) {  
+    # 将对角线元素的颜色设置为灰色  
+    if (i == j) {  
+      grid.rect(x, y, width, height,  
+                gp = gpar(fill = "gray", col = NA))  # 对角线设置为灰色  
+    } else {  
+      grid.rect(x, y, width, height,  
+                gp = gpar(fill = fill, col = NA))  # 其他元素使用原始颜色  
+    }  
+    # 添加聚类分界线  
+    if (i < length(labels_reordered) && labels_reordered[i] != labels_reordered[i + 1]) {  
+      grid.rect(x, y, width, height,  
+                gp = gpar(col = "black", fill = NA, lwd = 2))  # 增加分界线宽度  
+    }  
+    if (j < length(labels_reordered) && labels_reordered[j] != labels_reordered[j + 1]) {  
+      grid.rect(x, y, width, height,  
+                gp = gpar(col = "black", fill = NA, lwd = 2))  # 增加分界线宽度  
+    }  
+  }  
+)  
+
+# 添加新的图例  
+cluster_legend <- Legend(  
+  at = levels(clusters),  
+  title = "Cluster",  
+  legend_gp = gpar(fill = cluster_colors[levels(clusters)])  
+)  
+# 保存图像到 PNG  
+png_path <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result1/sFigure1/clustering.png"  # 指定保存路径  
+png(png_path, width = 800, height = 800, res = 300)  # 创建 PNG 文件  
+draw(ht, heatmap_legend_list = list(cluster_legend))  # 绘制热图和图例  
+dev.off()  # 关闭 PNG 设备  
+
+# 保存图像到 PDF  
+pdf_path <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result1/sFigure1/clustering.pdf"  # 指定存储路径  
+pdf(pdf_path, width = 8, height = 8)  # 创建 PDF 文件  
+draw(ht, heatmap_legend_list = list(cluster_legend))  # 绘制热图和图例  
+dev.off()  # 关闭 PDF 设备  
+
+cat("热图已保存到：\n", pdf_path, "\n", png_path, "\n")  
+```
+
+
+
+
+##聚类tSNE图
+```{r pressure, echo=FALSE}
+# 加载必要的库  
+library(Rtsne)  # Rtsne包用于t-SNE降维  
+library(vegan)  # vegan包用于PERMANOVA分析  
+library(ggplot2)  # ggplot2包用于绘图  
+
+# 复制 W 并将对角线值设置为 1  
+W_copy <- W  # 使用您的实际相似性矩阵  
+diag(W_copy) <- 1  # 将对角线的值修改为 1  
+
+# 将相似性矩阵转换为距离矩阵  
+D <- 1 - W_copy  # 假设 W_copy 是新的相似性矩阵  
+
+# 假设 lab 是你的数据框，包含聚类标签，列名为 labels  
+# lab <- ...  # 取消注释并替换为实际的聚类标签数据框  
+
+# 提取聚类标签  
+labels <- lab$labels  # 提取 labels 列  
+
+# 应用 t-SNE  
+tsne_result <- Rtsne(D, perplexity = 30, check_duplicates = FALSE)  
+
+# 提取 t-SNE 结果并转换为数据框  
+tsne_df <- data.frame(tsne_result$Y)  
+colnames(tsne_df) <- c("tSNE_1", "tSNE_2")  
+tsne_df$labels <- as.factor(labels)  # 添加 labels 标签并转换为因子类型  
+
+# 自定义颜色映射  
+custom_colors <- c("1" = "#990026", "2" = "#1e4e8a")    
+custom_fill_colors <- c("1" = "#8a4048", "2" = "#26496d")   
+
+# 基本散点图，添加细胞类型  
+p <- ggplot(data = tsne_df, aes(x = tSNE_1, y = tSNE_2)) +  
+  geom_point(aes(color = labels), size = 3, alpha = 0.8)  # 使用 labels 作为颜色映射  
+
+# 添加填充型置信椭圆  
+p1 <- p +  
+  stat_ellipse(aes(color = labels, fill = labels),   
+               level = 0.95, linetype = 1, show.legend = FALSE,   
+               geom = 'polygon', alpha = 0.1) +  # 添加填充型置信椭圆  
+  scale_color_manual(values = custom_colors) +  # 设置边界颜色  
+  scale_fill_manual(values = custom_fill_colors) +  # 设置填充颜色  
+  theme_minimal() +  # 更改主题  
+  theme(  
+    panel.grid.major = element_blank(),  # 删掉主要网格线  
+    panel.grid.minor = element_blank(),  # 删掉次要网格线  
+    panel.border = element_rect(color = "black", fill = NA, size = 1),  # 加黑色框  
+    axis.ticks.length = unit(0.25, "cm"),  # 设置刻度线长度  
+    plot.margin = margin(1, 1, 1, 1)  # 添加边距以避免标签重叠  
+  )  
+
+# 进行 PERMANOVA 分析以获取 p 值  
+permanova_result <- adonis(D ~ labels, data = data.frame(labels = labels))  # 使用 labels 进行 PERMANOVA 分析  
+p_value <- permanova_result$aov.tab$`Pr(>F)`[1]  # 提取 p 值  
+
+# 在图上添加 p 值，格式为 P = 0.001，并使用斜体  
+p1 <- p1 + annotate("text", x = Inf, y = Inf, label = paste("P =", formatC(p_value, format = "f", digits = 3)),  
+                    hjust = 1.2, vjust = 2, color = "black", size = 5, fontface = "italic")  
+
+# 打印最终图形  
+print(p1)  
+
+# 保存图形为 PNG 和 PDF 格式  
+output_dir <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result1/D"  
+
+# 保存为 PNG  
+ggsave(filename = file.path(output_dir, "tsne_plot.png"), plot = p1, width = 7, height = 5, units = "in", dpi = 300)  
+
+# 保存为 PDF  
+ggsave(filename = file.path(output_dir, "tsne_plot.pdf"), plot = p1, width = 7, height = 5, units = "in")  
+
+# 打印 PERMANOVA 分析结果，包括实际的 p 值  
+f_statistic <- permanova_result$aov.tab$F[1]           # F 统计量  
+r_squared <- permanova_result$aov.tab$R2[1]             # 调整后的 R²  
+
+cat("PERMANOVA Analysis:\n")  
+cat("F-statistic: ", f_statistic, "\n")  
+cat("p-value: ", formatC(p_value, format = "f", digits = 6), "\n")  # 显示 p 值，保留 6 位小数  
+cat("Adjusted R²: ", r_squared, "\n")  
+```
+
+
+##门分类-热图
+```{r pressure, echo=FALSE}
+met <- meta(sps)
+dat <- melt(met[, c("k__Archaea", "k__Bacteria", "k__Fungi", "k__Viruses")])
+
+col4<- c( "#BE5C37", "#5B9C4B", "#507AAF", "#831A21")
+ggplot(data=dat, aes(x = variable, y = log(value), group=variable)) +
+    geom_boxplot(aes(x=variable, fill=variable), notch=FALSE) +
+    scale_fill_manual(values=col4) +
+    theme(title=element_text(size=14,color="#4F4F4F"))+
+    theme_classic()+ 
+    theme(axis.text.x = element_text(size=14),axis.text.y = element_text(size=14)) + 
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + 
+    theme(legend.title = element_blank())+ 
+    theme(legend.position='none')+
+    theme(plot.title = element_text(hjust = 0.5))+
+    labs(title= "Abundance in gut microbiome", y="log10(Reads count)", x="")
+
+
+met <- meta(sps)
+arc = subset_taxa(sps, k == "k__Archaea")
+bac = subset_taxa(sps, k == "k__Bacteria")
+fun = subset_taxa(sps, k == "k__Fungi")
+vir = subset_taxa(sps, k == "k__Viruses")
+
+arc@otu_table <- otu_table(t(t(arc@otu_table)/met$k__Archaea), taxa_are_rows = TRUE)
+bac@otu_table <- otu_table(t(t(bac@otu_table)/met$k__Bacteria), taxa_are_rows = TRUE)
+fun@otu_table <- otu_table(t(t(fun@otu_table)/met$k__Fungi), taxa_are_rows = TRUE)
+vir@otu_table <- otu_table(t(t(vir@otu_table)/met$k__Viruses), taxa_are_rows = TRUE)
+
+top60 = rbind(arc@otu_table[names(sort(taxa_sums(arc), TRUE)[1:15]),], 
+           bac@otu_table[names(sort(taxa_sums(bac), TRUE)[1:15]),], 
+           fun@otu_table[names(sort(taxa_sums(fun), TRUE)[1:15]),], 
+           vir@otu_table[names(sort(taxa_sums(vir), TRUE)[1:15]),])
+
+rownames(top60) <- tax[rownames(top60),]$s
+
+# 包
+library(pheatmap)  
+library(gridExtra)  
+library(cowplot)  
+library(Cairo)  
+library(grid)
+# 创建分块热图并保存为 gtable 对象  
+heatmap1 <- pheatmap(top60[1:15,],   
+                cluster_rows = TRUE,   
+                cluster_cols = FALSE,   
+                show_colnames = FALSE,  # 不显示列名  
+                border = FALSE,   
+                color = colorRampPalette(colors = c("#F7F7E9","#BE5C37"))(100),   
+                silent = TRUE,   
+                fontsize_row = 4,   # 行名字体大小调整为4  
+                fontsize_col = 6,   # 列名字体大小  
+                fontsize = 6,  # 图例字体大小设置为6  
+                treeheight_row = 0)  
+
+heatmap2 <- pheatmap(top60[16:30,],   
+                cluster_rows = TRUE,   
+                cluster_cols = FALSE,   
+                show_colnames = FALSE,  # 不显示列名  
+                border = FALSE,   
+                color = colorRampPalette(colors = c("#F7F7E9","#5B9C4B"))(100),   
+                silent = TRUE,   
+                fontsize_row = 4,   # 行名字体大小调整为4  
+                fontsize_col = 6,   # 列名字体大小  
+                fontsize = 6,  # 图例字体大小设置为6  
+                treeheight_row = 0)  
+
+heatmap3 <- pheatmap(top60[31:45,],   
+                cluster_rows = TRUE,   
+                cluster_cols = FALSE,   
+                show_colnames = FALSE,   # 不显示列名  
+                border = FALSE,   
+                color = colorRampPalette(colors = c("#F7F7E9","#507AAF"))(100),   
+                silent = TRUE,   
+                fontsize_row = 4,   # 行名字体大小调整为4  
+                fontsize_col = 6,   # 列名字体大小  
+                fontsize = 6,  # 图例字体大小设置为6  
+                treeheight_row = 0)  
+
+heatmap4 <- pheatmap(top60[46:60,],   
+                cluster_rows = TRUE,   
+                cluster_cols = FALSE,   
+                show_colnames = FALSE,   # 不显示列名  
+                border = FALSE,   
+                color = colorRampPalette(colors = c("#F7F7E9","#831A21"))(100),   
+                silent = TRUE,   
+                fontsize_row = 4,   # 行名字体大小调整为4  
+                fontsize_col = 6,   # 列名字体大小  
+                fontsize = 6,  # 图例字体大小设置为6  
+                treeheight_row = 0)  
+
+# 创建保存目录  
+output_dir <- "/Users/qiaotong2023/Desktop/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/结果1 分子分型-临床特征相关性/结果1 icb分型/plot1/D_E"  
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)  
+
+# 单独保存每个热图为PNG和PDF  
+ggsave(file.path(output_dir, "heatmap1.png"),   
+       heatmap1$gtable,   
+       width = 9, height = 4, units = "in", dpi=300)  # 设置保存的宽度和高度  
+ggsave(file.path(output_dir, "heatmap1.pdf"),   
+       heatmap1$gtable,   
+       width = 9, height = 4, units = "in", dpi=300)  
+
+ggsave(file.path(output_dir, "heatmap2.png"),   
+       heatmap2$gtable,   
+       width = 9, height = 4, units = "in", dpi=300)   
+ggsave(file.path(output_dir, "heatmap2.pdf"),   
+       heatmap2$gtable,   
+       width = 9, height = 4, units = "in", dpi=300)  
+
+ggsave(file.path(output_dir, "heatmap3.png"),   
+       heatmap3$gtable,   
+       width = 9, height = 4, units = "in", dpi=300)    
+ggsave(file.path(output_dir, "heatmap3.pdf"),   
+       heatmap3$gtable,   
+       width = 9, height = 4, units = "in", dpi=300)  
+
+ggsave(file.path(output_dir, "heatmap4.png"),   
+       heatmap4$gtable,   
+       width = 9, height = 4, units = "in", dpi=300)    
+ggsave(file.path(output_dir, "heatmap4.pdf"),   
+       heatmap4$gtable,   
+       width = 9, height = 4, units = "in", dpi=300)   
+```
+
+
+
+
+
+##C1/C2的R/NR、PFS>6_month分布
+```{r pressure, echo=FALSE}
+# 加载必要的包  
+library(dplyr)  
+library(ggplot2)  
+library(scales)  
+
+# 假设 META 数据框已存在，并包含 Cluster, Response 和 PFS_6_month 列  
+
+# 创建新数据框，不修改原始数据框  
+META_clean <- META %>%  
+  mutate(Response = recode(Response,  
+                           `Responder` = "R",  
+                           `Non_Responder` = "NR"),  
+         PFS_6_month = recode(PFS_6_month,  
+                               `Below` = "No",  
+                               `Above` = "Yes"))  
+
+# 自定义颜色  
+pfs_colors <- c("C1/Yes" = "#990026", "C1/No" = "#CC6666",   
+                 "C2/Yes" = "#1e4e8a", "C2/No" = "#6699CC")  
+
+response_colors <- c("C1/R" = "#990026", "C1/NR" = "#CC6666",  
+                     "C2/R" = "#1e4e8a", "C2/NR" = "#6699CC")  
+
+# 创建 PFS_6_month 和 Cluster 列的分组  
+META_clean <- META_clean %>%  
+  mutate(PFS_group = case_when(  
+    Cluster == 1 & PFS_6_month == "Yes" ~ "C1/Yes",  
+    Cluster == 1 & PFS_6_month == "No" ~ "C1/No",  
+    Cluster == 2 & PFS_6_month == "Yes" ~ "C2/Yes",  
+    Cluster == 2 & PFS_6_month == "No" ~ "C2/No",  
+    TRUE ~ NA_character_))  
+
+# 计算每个分类的计数  
+pfs_summary <- META_clean %>%  
+  filter(!is.na(PFS_group)) %>%  
+  group_by(Cluster, PFS_group) %>%  
+  summarise(count = n(), .groups = 'drop') %>%  
+  group_by(Cluster) %>%  
+  mutate(percentage = count / sum(count))  
+
+# 进行 Fisher 检验  
+fisher_test_pfs <- fisher.test(table(META_clean$Cluster, META_clean$PFS_group))  
+
+# 打印 Fisher 检验结果  
+cat("\n---\nFisher 检验结果（PFS_6_month）：\n")  
+print(fisher_test_pfs)  
+
+# 格式化 p 值  
+if (fisher_test_pfs$p.value < 0.01) {  
+  p_value_text_pfs <- "P < 0.01"  
+} else if (fisher_test_pfs$p.value < 0.05) {  
+  p_value_text_pfs <- "P < 0.05"  
+} else {  
+  p_value_text_pfs <- paste("P =", format(fisher_test_pfs$p.value, nsmall = 3, digits = 3))  
+}  
+
+# 可视化 PFS_6_month  
+pfs_plot <- ggplot(pfs_summary, aes(x = as.factor(Cluster), y = percentage, fill = PFS_group)) +  
+  geom_bar(stat = "identity", position = "fill") +   
+  scale_y_continuous(labels = function(x) paste0(format(x * 100, nsmall = 0), "%"),  
+                     breaks = seq(0, 1, by = 0.25), limits = c(0, 1)) +  
+  theme_minimal() +  
+  scale_fill_manual(values = pfs_colors) +   
+  labs(x = "Cluster", y = "Percentage", fill = "PFS > 6_month") +  
+  theme(panel.grid.major = element_blank(),  
+        panel.grid.minor = element_blank(),  
+        panel.background = element_blank(),  
+        plot.background = element_rect(fill = "white"),  
+        text = element_text(color = "black"),  
+        axis.text = element_text(color = "black"),  
+        axis.title = element_text(size = 12),  
+        axis.ticks = element_line(color = "black"),  
+        axis.line = element_line(color = "black", linewidth = 0.5),  
+        panel.border = element_blank()) +  
+  ggtitle(bquote(italic(.(p_value_text_pfs)))) +  # 以斜体显示 p 值  
+  theme(plot.title = element_text(hjust = 0.5))  # 标题居中  
+
+# 保存 PFS_6_month 图表  
+pfs_save_path <- "/Users/qiaotong2023/Desktop/qt/科研/课题/题目1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/B"  
+dir.create(pfs_save_path, recursive = TRUE, showWarnings = FALSE)  
+ggsave(filename = file.path(pfs_save_path, "PFS_plot.png"), plot = pfs_plot, width = 6, height = 8, units = "in")  
+ggsave(filename = file.path(pfs_save_path, "PFS_plot.pdf"), plot = pfs_plot, width = 6, height = 8, units = "in")  
+
+# 删除中间变量  
+rm(pfs_summary, pfs_plot, fisher_test_pfs, p_value_text_pfs, META_clean)  
+
+# 对 Response 变量进行分组  
+response_summary <- META %>%  
+  mutate(Response = recode(Response,  
+                           `Responder` = "R",  
+                           `Non_Responder` = "NR")) %>%  
+  filter(!is.na(Response)) %>%  
+  mutate(Group = recode(paste0("C", Cluster, "/", Response),  
+                         `C1/R` = "C1/R",  
+                         `C1/NR` = "C1/NR",  
+                         `C2/R` = "C2/R",  
+                         `C2/NR` = "C2/NR")) %>%  
+  filter(!is.na(Group)) %>%  
+  group_by(Cluster, Group) %>%  
+  summarise(count = n(), .groups = 'drop') %>%  
+  group_by(Cluster) %>%  
+  mutate(percentage = count / sum(count))  
+
+# 进行 Fisher 检验  
+# 使用原始数据框中的 Cluster 列和新的 Response Group 列进行列联表建立  
+contingency_table <- table(META$Cluster,   
+                            factor(ifelse(META$Response == "Responder", "R", "NR")))  
+
+# 进行 Fisher 检验  
+fisher_test_response <- fisher.test(contingency_table)  
+
+# 打印 Fisher 检验结果  
+cat("\n---\nFisher 检验结果（Response）：\n")  
+print(fisher_test_response)  
+
+# 格式化 p 值  
+if (fisher_test_response$p.value < 0.01) {  
+  p_value_text_response <- "P < 0.01"  
+} else if (fisher_test_response$p.value < 0.05) {  
+  p_value_text_response <- "P < 0.05"  
+} else {  
+  p_value_text_response <- paste("P =", format(fisher_test_response$p.value, nsmall = 3, digits = 3))  
+}  
+
+# 可视化 Response  
+response_plot <- ggplot(response_summary, aes(x = as.factor(Cluster), y = percentage, fill = Group)) +  
+  geom_bar(stat = "identity", position = "fill") +   
+  scale_y_continuous(labels = function(x) paste0(format(x * 100, nsmall = 0), "%"),  
+                     breaks = seq(0, 1, by = 0.25), limits = c(0, 1)) +  
+  theme_minimal() +  
+  scale_fill_manual(values = response_colors) +   
+  labs(x = "Cluster", y = "Percentage", fill = "Response") +  
+  theme(panel.grid.major = element_blank(),  
+        panel.grid.minor = element_blank(),  
+        panel.background = element_blank(),  
+        plot.background = element_rect(fill = "white"),  
+        text = element_text(color = "black"),  
+        axis.text = element_text(color = "black"),  
+        axis.title = element_text(size = 12),  
+        axis.ticks = element_line(color = "black"),  
+        axis.line = element_line(color = "black", linewidth = 0.5),  
+        panel.border = element_blank()) +  
+  ggtitle(bquote(italic(.(p_value_text_response)))) +  # 以斜体显示 p 值  
+  theme(plot.title = element_text(hjust = 0.5))  # 标题居中  
+
+# 保存 Response 图表  
+response_save_path <- "/Users/qiaotong2023/Desktop/qt/科研/课题/题目1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/B"  
+dir.create(response_save_path, recursive = TRUE, showWarnings = FALSE)  
+ggsave(filename = file.path(response_save_path, "Response_plot.png"), plot = response_plot, width = 6, height = 8, units = "in")  
+ggsave(filename = file.path(response_save_path, "Response_plot.pdf"), plot = response_plot, width = 6, height = 8, units = "in")  
+
+# 删除中间变量  
+rm(response_summary, response_plot, fisher_test_response, p_value_text_response)  
+
+cat("\n---\n生成 PFS_6_month 和 Response 图表完成，已清理中间变量！")  
+```
+
+##癌种xR/NR PFS
+```{r pressure, echo=FALSE}
+library(dplyr)  
+library(tidyr)  
+library(ggplot2)  
+library(ggtext)  
+
+# 颜色定义  
+colors_RandNR <- c(  
+  "C1/R" = "#990026",  
+  "C1/NR" = "#CC6666",  
+  "C2/R" = "#1e4e8a",  
+  "C2/NR" = "#6699CC"  
+)  
+
+colors_PFS <- c(  
+  "C1/No" = "#990026",  
+  "C1/Yes" = "#CC6666",  
+  "C2/No" = "#1e4e8a",  
+  "C2/Yes" = "#6699CC"  
+)  
+
+# 通用分析函数  
+analyze_categorical_by_disease <- function(  
+  data,   
+  cluster_col,   
+  response_col,   
+  colors,   
+  save_dir,   
+  file_prefix,  
+  fisher_cols = NULL  
+) {  
+  # 创建保存文件夹  
+  dir.create(save_dir, recursive = TRUE, showWarnings = FALSE)  
+  
+  # 数据预处理和分组  
+  results <- data %>%  
+    group_by(Host_disease, !!sym(cluster_col), !!sym(response_col)) %>%  
+    summarise(  
+      Count = n(),   
+      .groups = 'drop_last'  
+    ) %>%  
+    mutate(Percentage = Count / sum(Count) * 100) %>%  
+    ungroup()  
+  
+  # Fisher精确检验  
+  fisher_results <- data %>%  
+    group_by(Host_disease) %>%  
+    summarise(  
+      p_value = tryCatch({  
+        if (!is.null(fisher_cols)) {  
+          fisher.test(table(!!sym(fisher_cols[1]), !!sym(fisher_cols[2])))$p.value  
+        } else {  
+          fisher.test(table(!!sym(cluster_col), !!sym(response_col)))$p.value  
+        }  
+      }, error = function(e) NA),  
+      .groups = 'drop'  
+    )  
+  
+  # 为每个癌种绘制堆叠柱状图  
+  for (disease in unique(results$Host_disease)) {  
+    disease_data <- results %>% filter(Host_disease == disease)  
+    p_value <- fisher_results$p_value[fisher_results$Host_disease == disease]  
+    
+    # 准备数据，添加样本数标签  
+    plot_data <- disease_data %>%  
+      group_by(!!sym(cluster_col)) %>%  
+      mutate(  
+        label = paste0("n=", Count),  
+        full_label = paste0(!!sym(response_col), "\n", label)  
+      )  
+    
+    # 绘图  
+    p <- ggplot(plot_data, aes(x = !!sym(cluster_col), y = Percentage, fill = !!sym(response_col))) +  
+      geom_bar(stat = "identity", width = 0.7) +  
+      scale_fill_manual(values = colors) +  
+      scale_y_continuous(labels = scales::percent_format(scale = 1)) +  
+      labs(y = "Percentage (%)") +  
+      theme_minimal() +  
+      theme(  
+        legend.title = element_blank(),  
+        panel.grid.major = element_blank(),  
+        panel.grid.minor = element_blank(),  
+        axis.title.x = element_text(face = "plain", size = 12),  
+        axis.text.x = element_text(face = "plain", size = 10),  
+        axis.title.y = element_text(size = 12),  
+        legend.position = "top",  
+        legend.justification = c(0.5, 1)  
+      ) +  
+      geom_text(  
+        aes(label = label),  
+        position = position_stack(vjust = 0.5),  
+        color = "white",  
+        fontface = "bold"  
+      ) +  
+      annotate(  
+        "text",   
+        x = 1.5,   
+        y = 105,   
+        label = paste("p =", format(p_value, digits = 2)),   
+        size = 5  
+      ) +  
+      theme(panel.border = element_rect(color = "black", fill = NA, size = 1))  
+    
+    # 保存图形  
+    ggsave(  
+      filename = file.path(save_dir, paste0(disease, "_", file_prefix, "_Distribution.pdf")),   
+      plot = p,   
+      height = 8,   
+      width = 5,   
+      dpi = 300  
+    )  
+    ggsave(  
+      filename = file.path(save_dir, paste0(disease, "_", file_prefix, "_Distribution.png")),   
+      plot = p,   
+      height = 8,   
+      width = 5,   
+      dpi = 300  
+    )  
+  }  
+  
+  # 保存总体结果  
+  write.csv(results,   
+            file.path(save_dir, paste0(file_prefix, "_Results.csv")),   
+            row.names = FALSE)  
+  
+  write.csv(fisher_results,   
+            file.path(save_dir, paste0(file_prefix, "_Fisher_Results.csv")),   
+            row.names = FALSE)  
+  
+  return(results)  
+}  
+
+# R/NR分析  
+response_analysis <- analyze_categorical_by_disease(  
+  data = META %>%   
+    mutate(  
+      Cluster_Response = paste0("C", Cluster, "/",   
+        recode(Response,   
+          "Responder" = "R",   
+          "Non_Responder" = "NR")  
+      )  
+    ),  
+  cluster_col = "Cluster",  
+  response_col = "Cluster_Response",  
+  colors = colors_RandNR,  
+  save_dir = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result1/sFigure1/cancerRNR",  
+  file_prefix = "RandNR",  
+  fisher_cols = c("Cluster", "Response")  
+)  
+
+# PFS分析  
+pfs_analysis <- analyze_categorical_by_disease(  
+  data = META %>%   
+    mutate(PFS_6_month = recode(PFS_6_month,  
+                                 "Below" = "No",  
+                                 "Above" = "Yes")) %>%  # 修改 PFS_6_month 列  
+    filter(PFS_6_month %in% c("Yes", "No")) %>%  
+    mutate(  
+      Cluster_PFS = paste0("C", Cluster, "/", PFS_6_month)  
+    ),  
+  cluster_col = "Cluster",  
+  response_col = "Cluster_PFS",  
+  colors = colors_PFS,  
+  save_dir = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result1/sFigure1/cancerPFS",  
+  file_prefix = "PFS",  
+  fisher_cols = c("Cluster", "PFS_6_month")  
+)  
+
+```
+
+
+##C1/C2临床特征（方差、Fisher检验和画图）
+```{r pressure, echo=FALSE}
+# 加载必要的包  
+library(dplyr)  
+library(ggplot2)  
+library(scales)  # 添加这个包以确保格式化功能正常  
+
+# 假设 META 数据框已存在，并包含 Cluster 列  
+# 需要分析的分类变量  
+categorical_cols <- c("Therapy", "Antibiotics", "Host_sex", "Age")  
+
+# 绘制分类变量的图形  
+for (col in categorical_cols) {  
+  # 针对当前变量创建干净的数据框副本  
+  META_clean <- META %>%  
+    filter(!!sym(col) != "") %>%  
+    mutate(Therapy = trimws(Therapy))  # 去掉 Therapy 中的空格  
+
+  # 处理 Therapy 变量，过滤掉 CTLA4  
+  if (col == "Therapy") {  
+    META_clean <- META_clean %>%  
+      filter(Therapy %in% c("PD-1/PD-L1", "PD1", "PD1/CTLA4"))  # 仅保留必要的分类  
+  }  
+
+  # 计算每个类别在每个 Cluster 中的计数  
+  col_summary <- META_clean %>%  
+    group_by(Cluster, !!sym(col)) %>%  
+    summarise(count = n(), .groups = 'drop') %>%  
+    group_by(Cluster) %>%  
+    mutate(percentage = count / sum(count))  # 计算相对比例，保持在 [0, 1] 之间  
+
+  # 检查每个 Cluster 的计数  
+  total_counts <- col_summary %>%   
+    group_by(Cluster) %>%  
+    summarise(total = sum(count))  
+  
+  print(total_counts)  # 输出每个 Cluster 的总计数  
+  print(col_summary)    # 调试输出，查看数据  
+
+  # 检查是否有类别数据  
+  if (nrow(col_summary) == 0) {  
+    warning(paste("No data available for column:", col))  
+    next  
+  }  
+
+  # 计算 p 值（使用 Fisher 检验）  
+  fisher_test <- fisher.test(table(META_clean$Cluster, META_clean[[col]]))  
+
+  # 格式化 p 值  
+  if (fisher_test$p.value < 0.01) {  
+    p_value_text <- "P < 0.01"  
+  } else if (fisher_test$p.value < 0.05) {  
+    p_value_text <- "P < 0.05"  
+  } else {  
+    p_value_text <- paste("P =", format(fisher_test$p.value, nsmall = 3, digits = 3))  # 保留三位小数  
+  }  
+
+  # 可视化  
+  plot <- ggplot(col_summary, aes(x = as.factor(Cluster), y = percentage, fill = !!sym(col))) +  
+    geom_bar(stat = "identity", position = "fill") +  # 使用 position = "fill" 堆叠比例  
+    labs(x = "Cluster", y = "Percentage") +    
+    scale_y_continuous(labels = percent_format(accuracy = 1),  # 转换为百分比格式  
+                       breaks = seq(0, 1, by = 0.25), limits = c(0, 1)) +  # 设置 y 轴限制到 [0, 1]  
+    theme_minimal() +  
+    theme(panel.grid.major = element_blank(),  
+          panel.grid.minor = element_blank(),  
+          panel.background = element_blank(),  
+          plot.background = element_rect(fill = "white"),  
+          text = element_text(color = "black"),  
+          axis.text = element_text(color = "black"),  
+          axis.title = element_text(size = 12),  
+          axis.ticks = element_line(color = "black"),  
+          axis.line = element_line(color = "black", size = 0.5),  
+          legend.text = element_text(color = "black"),  
+          plot.title = element_text(hjust = 0.5)) +  # 标题居中  
+    ggtitle(p_value_text)  # 使用格式化后的 p 值作为标题  
+
+  # 根据分类变量设置颜色  
+  if (col == "Therapy") {  
+    plot <- plot + scale_fill_manual(values = c("PD-1/PD-L1" = "#FCBB44",  
+                                                 "PD1" = "#CC6666",  
+                                                 "PD1/CTLA4" = "#6699CC"))  
+  } else if (col == "Antibiotics") {  
+    plot <- plot + scale_fill_manual(values = c("no" = "#CC6666", "yes" = "#6699CC"))  
+  } else if (col == "Host_sex") {  
+    plot <- plot + scale_fill_manual(values = c("Female" = "#CC6666", "Male" = "#6699CC"))  
+  } else if (col == "Age") {  
+    plot <- plot + scale_fill_manual(values = c("<65" = "#CC6666", ">=65" = "#6699CC"))  
+  }  
+
+  # 保存图表为 PNG 和 PDF 格式  
+  save_path <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result1/sFigure1/clinical"  
+  dir.create(save_path, recursive = TRUE, showWarnings = FALSE)  
+  ggsave(filename = file.path(save_path, paste0(col, "_plot.png")), plot = plot, width = 6, height = 8, units = "in")  
+  ggsave(filename = file.path(save_path, paste0(col, "_plot.pdf")), plot = plot, width = 6, height = 8, units = "in")  
+
+  # 删除中间变量以节省内存  
+  rm(META_clean, col_summary, plot)  
+
+  cat("\n---\n")  
+}  
+
+# 处理 BMI  
+# 创建干净的数据框副本并删除缺失值  
+META_clean_bmi <- na.omit(META)  
+
+# 将 Cluster 列转换为因子  
+META_clean_bmi$Cluster <- as.factor(META_clean_bmi$Cluster)  
+
+# 方差分析  
+bmi_aov <- aov(BMI ~ Cluster, data = META_clean_bmi)  
+bmi_p_value <- summary(bmi_aov)[[1]][["Pr(>F)"]][1]  
+
+# 绘制 BMI 箱线图  
+bmi_plot <- ggplot(META_clean_bmi, aes(x = Cluster, y = BMI, fill = Cluster)) +  
+  geom_boxplot(outlier.colour = NA) +  # 删除箱线图中的异常值标记  
+  scale_fill_manual(values = c("1" = "#CC6666", "2" = "#6699CC")) +  
+  scale_y_continuous(limits = c(20, 40)) +  # 设置 y 轴范围  
+  labs(x = "Cluster", y = "BMI",   
+       title = paste("P =", format(bmi_p_value, nsmall = 3, digits = 3))) +  # 设置标题为 p 值  
+  theme_minimal() +  
+  theme(panel.grid.major = element_blank(),  
+        panel.grid.minor = element_blank(),  
+        panel.background = element_blank(),  
+        plot.background = element_rect(fill = "white"),  
+        text = element_text(color = "black"),  
+        axis.text = element_text(color = "black"),  
+        axis.title = element_text(size = 12),  
+        axis.ticks = element_line(color = "black"),  
+        axis.line = element_line(color = "black", size = 0.5),  
+        legend.text = element_text(color = "black"),  
+        plot.title = element_text(hjust = 0.5))  # 标题居中  
+
+# 保存 BMI 图表  
+ggsave(filename = file.path(save_path, "bmi_plot.png"), plot = bmi_plot, width = 6, height = 8, units = "in")  
+ggsave(filename = file.path(save_path, "bmi_plot.pdf"), plot = bmi_plot, width = 6, height = 8, units = "in")  
+
+# 删除 BMI 图表中间变量  
+rm(bmi_aov, bmi_p_value, bmi_plot)  
+```
+
+
+
+
+
+##生存分析-总、癌种差异
+```{r pressure, echo=FALSE}
+##总
+library(survival)  
+library(survminer)  
+library(dplyr)  
+library(gridExtra)  
+library(cowplot)  
+library(tidyr)  
+
+# 设置保存路径  
+save_path <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/C"  
+dir.create(save_path, recursive = TRUE, showWarnings = FALSE)  
+
+# 数据准备  
+META1 <- META %>%  
+  filter(!is.na(`OS_months.汇总.`), !is.na(Death_Event))  # 选择 OS_months.汇总. 和 Death_Event 列都不为 NA 的行  
+
+fit <- survfit(Surv(`OS_months.汇总.`, Death_Event) ~ Cluster, data = META1)  
+
+
+# 绘制生存曲线  
+surv_plot_obj <- ggsurvplot(  
+  fit,  
+  xlab = "Time(Months)",  
+  pval = TRUE,  
+  conf.int = FALSE,  
+  risk.table = TRUE,  
+  surv.scale = "percent",  
+  palette = c("#990026", "#1e4e8a"),  
+  break.x.by = 12  
+)  
+
+# 直接将 ggsurvplot 对象保存为 PDF  
+pdf(file.path(save_path, "survival_C1andC2.pdf"), width = 8, height = 8)  
+print(surv_plot_obj)  
+dev.off()  
+
+# 直接将 ggsurvplot 对象保存为 PNG  
+png(file.path(save_path, "survival_C1andC2.png"), width = 8, height = 8, units = "in", res = 300)  
+print(surv_plot_obj)  
+dev.off()
+
+library(survival)  
+library(survminer)  
+library(dplyr)  
+library(gridExtra)  
+
+# 假设已经存在名为 META 的数据框  
+
+# 自定义保存函数  
+save_plot <- function(plot, filename, width, height, type, save_path) {  
+  filename <- paste0(filename, ".", type)  
+  filepath <- file.path(save_path, filename)  
+
+  if (type == "pdf") {  
+    pdf(filepath, width = width, height = height)  
+    print(plot)  
+    dev.off()  
+  } else if (type == "png") {  
+    png(filepath, width = width, height = height, units = "in", res = 300)  
+    print(plot)  
+    dev.off()  
+  } else {  
+    stop("Invalid file type. Must be 'pdf' or 'png'.")  
+  }  
+}  
+
+# 数据预处理  
+# 疾病列表  
+diseases <- c("NSCLC", "RCC", "Melanoma", "B_cell lymphoma")  
+
+# 循环处理每个疾病  
+for (disease in diseases) {  
+  # 过滤数据，只保留当前疾病的数据，并且去除OS_months.汇总.或Death_Event缺失的行  
+  met_filtered <- META %>%  
+    filter(Host_disease == disease) %>%  
+    filter(!is.na(`OS_months.汇总.`) & !is.na(Death_Event)) %>%  
+    # 创建新的数据框，避免修改原始数据  
+    as.data.frame()  
+
+  # 打印使用的样本量  
+  cat(paste("Disease:", disease, "样本量:", nrow(met_filtered), "\n"))  
+
+  # 检查过滤后的数据是否为空  
+  if (nrow(met_filtered) == 0) {  
+    cat(paste("警告:", disease, "过滤后没有数据，跳过。\n"))  
+    next # 如果没有数据，则跳过当前疾病  
+  }  
+
+  # 创建分组变量  
+  met_filtered <- met_filtered %>%  
+    mutate(group = paste(Host_disease, "/C", Cluster, sep = ""))  
+
+  # 生存分析  
+  fit <- survfit(Surv(`OS_months.汇总.`, Death_Event) ~ group, data = met_filtered)  
+
+  # 自定义颜色  
+  my_palette <- c(  
+    "#990026",   # C1  
+    "#1e4e8a"    # C2  
+  )  
+
+  # 指定图例标签  
+  legend_labels <- paste0(disease, c("/C1", "/C2"))  
+
+  # 生成生存曲线图  
+  surv_plot_obj <- ggsurvplot(  
+    fit,  
+    data = met_filtered,  
+    xlab = "Time (Months)",  
+    pval = TRUE,  
+    conf.int = FALSE,  
+    risk.table = TRUE,  
+    surv.scale = "percent",  
+    palette = my_palette,  
+    break.x.by = 12,  
+    font.main = c(16, "bold"),  
+    font.x = c(14),  
+    font.y = c(14),  
+    font.legend = c(12),  
+    legend.labs = legend_labels,  
+
+    # 添加网格线到生存曲线  
+    ggtheme = theme_minimal() +  
+      theme(  
+        panel.grid.major = element_line(color = "lightgray", linetype = "dashed"),  
+        panel.grid.minor = element_line(color = "lightgray", linetype = "dotted"),  
+        #panel.border = element_rect(color = "black", fill = NA, size = 1) # 移除黑色框线  
+        plot.background = element_rect(fill = "white", color = NA), # 移除背景颜色和边框  
+        panel.border = element_blank() # 移除 panel border  
+      ),  
+
+    # 添加网格线到风险表  
+    risk.table.ggtheme = theme_minimal() +  
+      theme(  
+        panel.grid.major = element_line(color = "lightgray", linetype = "dashed"),  
+        panel.grid.minor = element_line(color = "lightgray", linetype = "dotted"),  
+        #panel.border = element_rect(color = "black", fill = NA, size = 1) # 移除黑色框线  
+        plot.background = element_rect(fill = "white", color = NA), # 移除背景颜色和边框  
+        panel.border = element_blank() # 移除 panel border  
+      )  
+  )  
+
+  # 合并生存曲线和风险表  
+  combined_plot <- grid.arrange(surv_plot_obj$plot, surv_plot_obj$table, nrow = 2, heights = c(0.7, 0.3))  
+}  
+ 
+```
+
+
+
+##生存分析-地区差异
+```{r pressure, echo=FALSE}
+library(survival)  
+library(survminer)  
+library(dplyr)  
+library(gridExtra)  
+
+# 假设已经存在名为 META 的数据框  
+
+# 自定义保存函数  
+save_plot <- function(plot, filename, width, height, type, save_path) {  
+  filename <- paste0(filename, ".", type)  
+  filepath <- file.path(save_path, filename)  
+
+  if (type == "pdf") {  
+    pdf(filepath, width = width, height = height)  
+    print(plot)  
+    dev.off()  
+  } else if (type == "png") {  
+    png(filepath, width = width, height = height, units = "in", res = 300)  
+    print(plot)  
+    dev.off()  
+  } else {  
+    stop("Invalid file type. Must be 'pdf' or 'png'.")  
+  }  
+}  
+
+# 数据预处理  
+# 国家列表  
+countries <- c("France", "USA", "United Kingdom", "Spain", "Netherlands")  
+
+# 循环处理每个国家  
+for (country in countries) {  
+  # 过滤数据，只保留当前国家的数据，并且去除OS_months.汇总.或Death_Event缺失的行  
+  met_filtered <- META %>%  
+    filter(Geo_loc_name_country == country) %>%  
+    filter(!is.na(`OS_months.汇总.`) & !is.na(Death_Event)) %>%  
+    # 创建新的数据框，避免修改原始数据  
+    as.data.frame()  
+
+  # 打印使用的样本量  
+  cat(paste("Country:", country, "样本量:", nrow(met_filtered), "\n"))  
+
+  # 检查过滤后的数据是否为空  
+  if (nrow(met_filtered) == 0) {  
+    cat(paste("警告:", country, "过滤后没有数据，跳过。\n"))  
+    next # 如果没有数据，则跳过当前国家  
+  }  
+
+  # 创建分组变量  
+  met_filtered <- met_filtered %>%  
+    mutate(group = paste(Geo_loc_name_country, "/C", Cluster, sep = ""))  
+
+  # 生存分析  
+  fit <- survfit(Surv(`OS_months.汇总.`, Death_Event) ~ group, data = met_filtered)  
+
+  # 自定义颜色  
+  my_palette <- c(  
+    "#8a4048",   # C1  
+    "#26496d"    # C2  
+  )  
+
+  # 指定图例标签  
+  legend_labels <- paste0(country, c("/C1", "/C2"))  
+
+  # 生成生存曲线图  
+  surv_plot_obj <- ggsurvplot(  
+    fit,  
+    data = met_filtered,  
+    xlab = "Time (Months)",  
+    pval = TRUE,  
+    conf.int = FALSE,  
+    risk.table = TRUE,  
+    surv.scale = "percent",  
+    palette = my_palette,  
+    break.x.by = 12,  
+    font.main = c(16, "bold"),  
+    font.x = c(14),  
+    font.y = c(14),  
+    font.legend = c(12),  
+    legend.labs = legend_labels,  
+
+    # 添加网格线到生存曲线  
+    ggtheme = theme_minimal() +  
+      theme(  
+        panel.grid.major = element_line(color = "lightgray", linetype = "dashed"),  
+        panel.grid.minor = element_line(color = "lightgray", linetype = "dotted"),  
+        #panel.border = element_rect(color = "black", fill = NA, size = 1) # 移除黑色框线  
+        plot.background = element_rect(fill = "white", color = NA), # 移除背景颜色和边框  
+        panel.border = element_blank() # 移除 panel border  
+      ),  
+
+    # 添加网格线到风险表  
+    risk.table.ggtheme = theme_minimal() +  
+      theme(  
+        panel.grid.major = element_line(color = "lightgray", linetype = "dashed"),  
+        panel.grid.minor = element_line(color = "lightgray", linetype = "dotted"),  
+        #panel.border = element_rect(color = "black", fill = NA, size = 1) # 移除黑色框线  
+        plot.background = element_rect(fill = "white", color = NA), # 移除背景颜色和边框  
+        panel.border = element_blank() # 移除 panel border  
+      )  
+  )  
+
+  # 合并生存曲线和风险表  
+  combined_plot <- grid.arrange(surv_plot_obj$plot, surv_plot_obj$table, nrow = 2, heights = c(0.7, 0.3))  
+
+  # 删除中间变量  
+  rm(met_filtered, fit, surv_plot_obj, combined_plot)  
+  gc() # 运行垃圾回收  
+}  
+library(survival)  
+library(dplyr)  
+
+# 数据预处理  
+met_filtered <- met %>%  
+  mutate(  
+    Geo_loc_name_country = ifelse(Geo_loc_name_country %in% c("US", "USA"), "USA", Geo_loc_name_country),  
+    Group = factor(interaction(Geo_loc_name_country, Cluster),   
+                   levels = c("France.1", "France.2", "USA.1", "USA.2"))  
+  ) %>%  
+  filter(Geo_loc_name_country %in% c("USA", "France"))  
+
+# 模型1：分组变量  
+cox_model1 <- coxph(Surv(`OS_months.汇总.`, Death_Event) ~ Group, data = met_filtered)  
+summary(cox_model1)  
+
+# 模型2：国家和Cluster作为独立变量  
+cox_model2 <- coxph(Surv(`OS_months.汇总.`, Death_Event) ~ Geo_loc_name_country + Cluster, data = met_filtered)  
+summary(cox_model2)  
+
+# 模型3：包含交互作用  
+cox_model3 <- coxph(Surv(`OS_months.汇总.`, Death_Event) ~ Geo_loc_name_country * Cluster, data = met_filtered)  
+summary(cox_model3)
+
+
+
+```
+
+
+
+
+##Cluster在不同采样点或时间的流动性
+```{r pressure, echo=FALSE}
+library(ggplot2)  
+library(ggalluvial)  
+library(dplyr)  
+library(tidyr)  
+library(gridExtra)  
+
+# 1. 假设你的数据框叫做 META，并且已经存在  
+# 创建 META 的副本  
+META_copy <- META  
+
+# 2. 将行名转换为一个名为 "样本ID" 的新列  
+META_copy$样本ID <- rownames(META_copy)  
+
+# 3. 数据预处理：  
+# 3.1. Sampling_Timepoint 列：  
+# 3.1.1. 删除 NA 值  
+META_copy <- META_copy %>%  
+  filter(!is.na(Sampling_Timepoint))  
+
+# 3.1.2. 替换特定值  
+META_copy$Sampling_Timepoint[META_copy$Sampling_Timepoint == "PreTreatment"] <- "T-1"  
+META_copy$Sampling_Timepoint[META_copy$Sampling_Timepoint == "Baseline"] <- "T0"  
+META_copy$Sampling_Timepoint[META_copy$Sampling_Timepoint %in% c("T1", "T2", "Week 6", "Week 12", "PostTreatment")] <- "T1"  
+META_copy$Sampling_Timepoint[META_copy$Sampling_Timepoint == ""] <- "T1"  
+
+# 3.1.3. 检查 Sampling_Timepoint 列的所有唯一值  
+unique_sampling_timepoints <- unique(META_copy$Sampling_Timepoint)  
+print("Sampling_Timepoint 列的唯一值:")  
+print(unique_sampling_timepoints)  
+
+# 3.2. SPT 列：  
+# 3.2.1. 将 NA 值替换为 "unknown"  
+META_copy$SPT[is.na(META_copy$SPT)] <- "unknown"  
+
+# 3.2.2. 将空字符串替换为 "unknown"  
+META_copy$SPT[META_copy$SPT == ""] <- "unknown"  
+
+# 3.2.3. 将 "Unknown" 替换为 "unknown"  
+META_copy$SPT[META_copy$SPT == "Unknown"] <- "unknown"  
+
+# 3.2.4. 检查 SPT 列的所有唯一值  
+unique_spt <- unique(META_copy$SPT)  
+print("SPT 列的唯一值:")  
+print(unique_spt)  
+
+# 4. 确保 Cluster、Sampling_Timepoint 和 SPT 都是字符类型  
+META_copy$Cluster <- as.character(META_copy$Cluster)  
+META_copy$Sampling_Timepoint <- as.character(META_copy$Sampling_Timepoint)  
+META_copy$SPT <- as.character(META_copy$SPT)  
+
+# 5. 定义颜色映射  
+cluster_colors <- c(  
+  "1" = "#CC6666",  
+  "2" = "#6699CC"  
+)  
+
+# 定义 Sampling_Timepoint 的顺序  
+sampling_timepoint_order <- c("T1", "T0", "T-1")  
+
+sampling_timepoint_colors <- c(  
+  "T-1" = "#FF9999",  
+  "T0" = "#66B3FF",  
+  "T1" = "#8ECFC9" 
+)  
+
+spt_colors <- c(  
+  "Baseline" = "#F5BE8F",  
+  "unknown" = "#CCD376"  
+)  
+
+# 6. 将数据转换为 lodes 格式  
+met_lodes <- META_copy %>%  
+  select(样本ID, Cluster, Sampling_Timepoint, SPT) %>%  
+  pivot_longer(cols = c(Cluster, Sampling_Timepoint, SPT), names_to = "x", values_to = "stratum")  
+
+# 7. 获取所有可能的 stratum 值  
+all_strata <- unique(met_lodes$stratum)  
+
+# 8. 创建完整的颜色映射  
+full_colors <- c(  
+  cluster_colors,  
+  sampling_timepoint_colors,  
+  spt_colors  
+)  
+
+# 9. 确保颜色映射包含所有 stratum 值  
+missing_colors <- all_strata[!all_strata %in% names(full_colors)]  
+if (length(missing_colors) > 0) {  
+  for (missing_color in missing_colors) {  
+    full_colors[missing_color] <- "grey"  # 为缺失的颜色指定默认颜色  
+  }  
+}  
+
+# 10. 创建 Alluvial Diagram  
+alluvial_plot <- ggplot(met_lodes,  
+       aes(x = x, stratum = stratum, alluvium = 样本ID,  
+           y = 1)) +  
+  geom_flow(aes(fill = stratum), width = 1/8) +  # alluvial flow  
+  geom_stratum(aes(fill = stratum), width = 1/8, color = "black") +  # 使用黑色边框  
+  scale_x_discrete(limits = c("Cluster", "Sampling_Timepoint", "SPT"),  # 定义 x 轴的顺序  
+                   labels = c("Cluster", "Sampling Timepoint", "SPT")) +  # 定义 x 轴标签  
+  scale_fill_manual(values = full_colors,  
+                    breaks = c(names(cluster_colors), sampling_timepoint_order, names(spt_colors))) +  # 指定 stratum 的顺序  
+  theme_void() +  # 移除背景  
+  theme(plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm"),  # 确保向量长度为 4  
+        plot.title = element_blank()) +  # 删除标题  
+  guides(fill = "none")  # 删除图例  
+
+# 11. 显示最终图表  
+print(alluvial_plot)  
+
+# 12. 保存图表为 PNG 和 PDF 格式  
+output_directory <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result1/sFigure1"  
+ggsave(file.path(output_directory, "alluvial.png"), plot = alluvial_plot, width = 10, height = 6, dpi = 300)  
+ggsave(file.path(output_directory, "alluvial.pdf"), plot = alluvial_plot, width = 10, height = 6)  
+
+# 13. 删除中间变量以释放内存  
+rm(META_copy, met_lodes, alluvial_plot, unique_sampling_timepoints, unique_spt)  
+```
+
+
+##alpha、beta多样性
+```{r pressure, echo=FALSE}
+library(vegan)  
+library(phyloseq)  
+library(ggpubr)  
+##抽平
+# 确保将数据框的数值列转换为数值型  
+s[] <- lapply(s, as.numeric)
+colSums(s)
+# 执行抽平 (Rarefaction) 并直接更新 's'  
+s <- as.data.frame(t(rrarefy(t(s), min(colSums(s))))) 
+# 计算每个物种的流行率 (prevalence)  
+prevalence <- rowSums(s > 0) / ncol(s)  
+
+#设定流行率阈值  
+threshold <- 0.2  
+
+#筛选出流行率大于等于阈值的物种，并更新数据框 s  
+s <- s[prevalence >= threshold, ]
+
+s_a <- s[grepl("^A_", rownames(s)), ]  
+s_b <- s[grepl("^B_", rownames(s)), ]  
+s_f <- s[grepl("^F_", rownames(s)), ]  
+s_v <- s[grepl("^V_", rownames(s)), ] +1 
+
+# 设定各类微生物结果的输出目录  
+output_dirs <- list(  
+  "Arc" = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/Arc",  
+  "Bac" = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/Bac",  
+  "Fun" = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/Fun",  
+  "Vir" = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/Vir",  
+  "TOTAL" = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/A"  
+)  
+
+# C1/C2函数
+process_microbiome_data <- function(abundance_data, meta_data, output_dir, microbe_type = "TOTAL") {  
+  # 确保输出目录存在，如果不存在则创建  
+  if (!dir.exists(output_dir)) {  
+    dir.create(output_dir, recursive = TRUE)  
+  }  
+  
+  # 1. 检查 OTU 丰度数据  
+  if (is.null(abundance_data) || nrow(abundance_data) == 0 || ncol(abundance_data) == 0) {  
+    stop("Input abundance_data must have non-zero dimensions.")  
+  }  
+  
+  # 2. 删除全为零的行和列  
+  abundance_data <- abundance_data[rowSums(abundance_data) > 0, ]  # 删除全为零的行  
+  abundance_data <- abundance_data[, colSums(abundance_data) > 0]  # 删除全为零的列  
+  
+  # 3. 创建 phyloseq 对象  
+  otu_table <- otu_table(abundance_data, taxa_are_rows = TRUE)  
+  sample_data <- sample_data(meta_data)  
+  physeq <- phyloseq(otu_table, sample_data)  
+  
+  # 4. 将 Cluster 列的值转换为 C1 和 C2  
+  sample_data(physeq)$cluster <- factor(paste0("C", sample_data(physeq)$Cluster))  
+  
+  ## alpha  
+  # 创建包含 richness 数据的 data.frame  
+  alpha_diversity <- estimate_richness(physeq, measures = c("Observed", "Shannon"))  
+  alpha_diversity$cluster <- sample_data(physeq)$cluster  
+  
+  # Observed p1  
+  sub_s.data <- alpha_diversity  
+  my_comparisons <- list(c("C1", "C2"))  
+  col2 <- c("#990026", "#1e4e8a")  
+  
+  # 进行 t 检验 (Observed Species)  
+  t_test_observed <- t.test(Observed ~ cluster, data = sub_s.data)  
+  p_value_observed <- t_test_observed$p.value  
+  
+  # 设置 Observed p 值标签：根据 p 值是否满足条件显示不同格式  
+  p_label_observed <- if (p_value_observed < 0.001) {   
+                            "P < 0.001"  
+                        } else {  
+                            paste("P =", formatC(p_value_observed, digits = 3))  
+                        }  
+  
+  # 设置 Observed y 轴范围  
+  observed_ylim <- switch(microbe_type,  
+                           "Arc" = c(0, 150),  
+                           "Bac" = c(1000, 5000),   
+                           "Fun" = c(0, 60),  
+                           "Vir" = c(0, 30),  
+                           c(1000, 6000))  # 默认范围  
+  
+  p1 <- ggplot(data = sub_s.data, aes(x = cluster, y = Observed, group = cluster)) +  
+    geom_boxplot(aes(x = cluster, fill = cluster)) +  
+    stat_summary(aes(x = cluster), fun = mean, geom = "point", color = "white") +  
+    geom_jitter(width = 0.2, size = 1) +  
+    scale_fill_manual(values = col2) +  
+    theme(title = element_text(size = 10, color = "#4F4F4F")) +  
+    theme_classic() +  
+    theme(axis.text.x = element_text(size = 10), axis.text.y = element_text(size = 10)) +  
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +  
+    theme(legend.title = element_blank()) +  
+    theme(legend.position = 'none') +  
+    theme(plot.title = element_text(hjust = 0.5)) +  
+    labs(title = "", y = "Observed Species", x = "") +  
+    coord_cartesian(ylim = observed_ylim) +  
+    annotate("text", x = 1.5, y = max(observed_ylim), label = as.character(p_label_observed), hjust = 0.5, vjust = 0, size = 4)  
+  
+  # 保存 Observed Species 箱线图  
+  ggsave(filename = file.path(output_dir, paste0("Observed_C1C2_", microbe_type, ".png")), plot = p1, width = 4, height = 4, units = "in", dpi = 300)  
+  ggsave(filename = file.path(output_dir, paste0("Observed_C1C2_", microbe_type, ".pdf")), plot = p1, width = 4, height = 4, units = "in")  
+  
+  # Shannon p2  
+  # 进行 t 检验 (Shannon 指数)  
+  t_test_shannon <- t.test(Shannon ~ cluster, data = sub_s.data)  
+  p_value_shannon <- t_test_shannon$p.value  
+  
+  # 设置 Shannon p 值标签：根据 p 值是否满足条件显示不同格式  
+  p_label_shannon <- if (p_value_shannon < 0.001) {   
+                          "P < 0.001"  
+                      } else {  
+                          paste("P =", formatC(p_value_shannon, digits = 3))  
+                      }   
+  
+  # 设置 Shannon y 轴范围  
+  shannon_ylim <- switch(microbe_type,  
+                          "Bac" = c(1, 5),  
+                          "Arc" = c(0, 5),  
+                          "Fun" = c(0, 4),  
+                          "Vir" = c(0, 3),  
+                          c(1, 5))  # 默认范围  
+  
+  p2 <- ggplot(data = sub_s.data, aes(x = cluster, y = Shannon, group = cluster)) +  
+    geom_boxplot(aes(x = cluster, fill = cluster)) +  
+    stat_summary(aes(x = cluster), fun = mean, geom = "point", color = "white") +  
+    geom_jitter(width = 0.2, size = 1.5) +  
+    scale_fill_manual(values = col2) +  
+    theme(title = element_text(size = 14, color = "#4F4F4F")) +  
+    theme_classic() +  
+    theme(axis.text.x = element_text(size = 14), axis.text.y = element_text(size = 14)) +  
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +  
+    theme(legend.title = element_blank()) +  
+    theme(legend.position = 'none') +  
+    theme(plot.title = element_text(hjust = 0.5)) +  
+    labs(title = "", y = "Shannon-index", x = "") +  
+    coord_cartesian(ylim = shannon_ylim) +  
+    annotate("text", x = 1.5, y = max(shannon_ylim), label = as.character(p_label_shannon), hjust = 0.5, vjust = 0, size = 4)  
+  
+  # 保存 Shannon 指数箱线图  
+  ggsave(filename = file.path(output_dir, paste0("Shannon_C1C2_", microbe_type, ".png")), plot = p2, width = 4, height = 4, units = "in", dpi = 300)  
+  ggsave(filename = file.path(output_dir, paste0("Shannon_C1C2_", microbe_type, ".pdf")), plot = p2, width = 4, height = 4, units = "in")  
+  
+  ## beta  
+  # 数据预处理：过滤低丰度的 OTU  
+  min_abundance <- 0.001  # 设置最小相对丰度阈值  
+  physeq_filtered <- filter_taxa(physeq, function(x) sum(x > min_abundance * sum(x)) > 0, prune = TRUE)  
+  
+  # 数据标准化：转换为相对丰度  
+  physeq_rel <- transform_sample_counts(physeq_filtered, function(x) x / sum(x))  
+  
+  # 确保没有缺失值  
+  # 确保 OTU 表没有 NA 值  
+  otu_table_rel <- otu_table(physeq_rel)  
+  
+  # 删除全为零的行和列  
+  otu_table_rel <- otu_table_rel[rowSums(otu_table_rel) > 0, ]  
+  otu_table_rel <- otu_table_rel[, colSums(otu_table_rel) > 0]  
+  
+  # 用更新后的 OTU 表创建 phyloseq 对象  
+  physeq_rel <- phyloseq(otu_table(otu_table_rel, taxa_are_rows = TRUE), sample_data(physeq_rel))  
+  
+  # 将 sample_data 转换为 data.frame  
+  sample_data_df <- data.frame(sample_data(physeq_rel))  
+  
+  # 确保 cluster 列是因子类型  
+  sample_data_df$cluster <- factor(sample_data_df$cluster)  
+  sample_data_df <- sample_data_df[!is.na(sample_data_df$cluster), ]  
+  
+  # 距离矩阵计算 (Bray-Curtis)  
+  bray_dist <- phyloseq::distance(physeq_rel, method = "bray")  
+  
+  # 距离矩阵计算 (Jaccard)  
+  jaccard_dist <- phyloseq::distance(physeq_rel, method = "jaccard")  
+  
+  # PERMANOVA 分析 (Bray-Curtis)  
+  adonis_bray <- adonis2(bray_dist ~ cluster, data = sample_data_df, permutations = 9999)  
+  
+  # PERMANOVA 分析 (Jaccard)  
+  adonis_jaccard <- adonis2(jaccard_dist ~ cluster, data = sample_data_df, permutations = 9999)  
+  
+  # 输出 PERMANOVA 统计报告  
+  cat("Bray-Curtis PERMANOVA 统计报告:\n")  
+  print(adonis_bray)  
+  cat("\nJaccard PERMANOVA 统计报告:\n")  
+  print(adonis_jaccard)  
+  
+  # 提取 PERMANOVA 的 p 值  
+  p_value_bray <- adonis_bray[["Pr(>F)"]][1]  
+  p_value_jaccard <- adonis_jaccard[["Pr(>F)"]][1]  
+  
+  # 设置 PCoA 图上显示的 p 值标签  
+  p_label_bray <- if (p_value_bray < 0.001) {   
+                     "P < 0.001"  
+                 } else {  
+                     paste("P =", formatC(p_value_bray, digits = 3))  
+                 }  
+  p_label_jaccard <- if (p_value_jaccard < 0.001) {   
+                        "P < 0.001"  
+                    } else {  
+                        paste("P =", formatC(p_value_jaccard, digits = 3))  
+                    }  
+  
+  # PCoA 分析 (Bray-Curtis)  
+  GP.ord_bray <- ordinate(physeq_rel, "PCoA", "bray")  
+  data1_bray <- plot_ordination(physeq_rel, GP.ord_bray, color = "cluster")  
+  data2_bray <- data1_bray$data  
+  
+  # 绘制 PCoA 图 (Bray-Curtis)  
+  p4_bray <- ggscatter(data2_bray, x = "Axis.1", y = "Axis.2",  
+                       color = "cluster", palette = col2,  
+                       ellipse = TRUE, size = 1, ellipse.level = 0.3,  
+                       mean.point = FALSE, star.plot = FALSE,  
+                       ggtheme = theme_minimal(),  
+                       rug = FALSE) +  
+    xlab(data1_bray[["labels"]][["x"]]) + ylab(data1_bray[["labels"]][["y"]]) +  
+    theme(axis.title.x = element_text(size = 16,  
+                                       face = "bold",  
+                                       vjust = 0.5,  
+                                       hjust = 0.5)) +  
+    theme(axis.title.y = element_text(size = 16,  
+                                       face = "bold",  
+                                       vjust = 0.5,  
+                                       hjust = 0.5)) +  
+    theme_bw() +  
+    annotate("text",  
+             x = max(data2_bray$Axis.1),  
+             y = max(data2_bray$Axis.2),  
+             label = as.character(p_label_bray),  # 使用 as.character()  
+             hjust = 1,  
+             vjust = 1,  
+             size = 4)  
+  
+  # 保存 Bray-Curtis PCoA 图  
+  ggsave(filename = file.path(output_dir, paste0("Bray_C1C2_", microbe_type, ".png")), plot = p4_bray, width = 4, height = 3, units = "in", dpi = 300)  
+  ggsave(filename = file.path(output_dir, paste0("Bray_C1C2_", microbe_type, ".pdf")), plot = p4_bray, width = 4, height = 3, units = "in")  
+  
+  # PCoA 分析 (Jaccard)  
+  GP.ord_jaccard <- ordinate(physeq_rel, "PCoA", "jaccard")  
+  data1_jaccard <- plot_ordination(physeq_rel, GP.ord_jaccard, color = "cluster")  
+  data2_jaccard <- data1_jaccard$data  
+  
+  # 绘制 PCoA 图 (Jaccard)  
+  p4_jaccard <- ggscatter(data2_jaccard, x = "Axis.1", y = "Axis.2",  
+                          color = "cluster", palette = col2,  
+                          ellipse = TRUE, size = 1, ellipse.level = 0.3,  
+                          mean.point = FALSE, star.plot = FALSE,  
+                          ggtheme = theme_minimal(),  
+                          rug = FALSE) +  
+    xlab(data1_jaccard[["labels"]][["x"]]) + ylab(data1_jaccard[["labels"]][["y"]]) +  
+    theme(axis.title.x = element_text(size = 16,  
+                                       face = "bold",  
+                                       vjust = 0.5,  
+                                       hjust = 0.5)) +  
+    theme(axis.title.y = element_text(size = 16,  
+                                       face = "bold",  
+                                       vjust = 0.5,  
+                                       hjust = 0.5)) +  
+    theme_bw() +  
+    annotate("text",  
+             x = max(data2_jaccard$Axis.1),  
+             y = max(data2_jaccard$Axis.2),  
+             label = as.character(p_label_jaccard),  # 使用 as.character()  
+             hjust = 1,  
+             vjust = 1,  
+             size = 4)  
+  
+  # 保存 Jaccard PCoA 图  
+  ggsave(filename = file.path(output_dir, paste0("Jaccard_C1C2_", microbe_type, ".png")), plot = p4_jaccard, width = 4, height = 3, units = "in", dpi = 300)  
+  ggsave(filename = file.path(output_dir, paste0("Jaccard_C1C2_", microbe_type, ".pdf")), plot = p4_jaccard, width = 4, height = 3, units = "in", dpi = 300)  
+  
+  # 删除中间变量  
+  rm(alpha_diversity, sub_s.data, my_comparisons, col2, t_test_observed, p_value_observed, p1, t_test_shannon, p_value_shannon, p2)  
+  rm(min_abundance, physeq_filtered, physeq_rel, sample_data_df, bray_dist, jaccard_dist, adonis_bray, adonis_jaccard, GP.ord_bray, data1_bray, data2_bray, p4_bray)  
+  rm(GP.ord_jaccard, data1_jaccard, data2_jaccard, p4_jaccard, p_value_bray, p_value_jaccard, p_label_bray, p_label_jaccard)  
+  rm(otu_table, sample_data, physeq)  
+  
+  cat(paste(microbe_type, "analysis completed.\n"))  
+}  
+process_microbiome_data(s_v, META, output_dirs$Vir, "Vir")  # 病毒  
+# 应用函数处理每种微生物数据  
+process_microbiome_data(s_a, META, output_dirs$Arc, "Arc")  # 古菌  
+process_microbiome_data(s_b, META, output_dirs$Bac, "Bac")  # 细菌  
+process_microbiome_data(s_f, META, output_dirs$Fun, "Fun")  # 真菌
+
+process_microbiome_data(s_v, META, output_dirs$Vir, "Vir")  # 病毒  
+process_microbiome_data(s, META, output_dirs$TOTAL, "TOTAL")  # 总微生物
+
+output_dirs <- list(  
+  "Arc" = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/Arc",  
+  "Bac" = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/Bac",  
+  "Fun" = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/Fun",  
+  "Vir" = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/Vir",  
+  "TOTAL" = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/TOTAL"  
+)  
+
+
+# Cluster+Response函数  
+process_microbiome_data <- function(abundance_data, meta_data, output_dir, microbe_type = "TOTAL") {  
+    # 确保输出目录存在，如果不存在则创建  
+    if (!dir.exists(output_dir)) {  
+        dir.create(output_dir, recursive = TRUE)  
+    }  
+    
+    # 创建 phyloseq 对象  
+    otu_table <- otu_table(abundance_data, taxa_are_rows = TRUE)  
+    sample_data <- sample_data(meta_data)  
+    physeq <- phyloseq(otu_table, sample_data)  
+    
+    # 将 Cluster 和 Response 列的值组合形成新的分组，简记为 C1/C2 和 R/NR  
+    sample_data(physeq)$group <- factor(paste0(ifelse(sample_data(physeq)$Cluster == 1, "C1", "C2"), "/",  
+                                               ifelse(sample_data(physeq)$Response == "Responder", "R", "NR")))  
+    
+    ## alpha 多样性分析  
+    # 创建包含 richness 数据的 data.frame  
+    alpha_diversity <- estimate_richness(physeq, measures = c("Observed", "Shannon"))  
+    alpha_diversity$group <- sample_data(physeq)$group  
+    
+    # 检查 alpha_diversity 的内容  
+    print(head(alpha_diversity))  # 打印前几行查看数据  
+    print(summary(alpha_diversity))  # 打印摘要查看数据分布  
+    
+    # 设置 Observed y 轴范围  
+    if (microbe_type == "TOTAL") {  
+        observed_ylim <- c(3500, 6000)  # 为TOTAL设置范围以确保p值能显示  
+    } else if (microbe_type == "Bac") {  
+        # 计算四组的最小离群值  
+        lower_outlier_limit <- boxplot.stats(alpha_diversity$Observed[alpha_diversity$group %in% c("C1/R", "C1/NR", "C2/R", "C2/NR")])$out  
+        if (length(lower_outlier_limit) == 0) {  
+            observed_ylim <- c(0, 5000)  # 如果没有离群值，设置默认范围  
+        } else {  
+            observed_ylim <- c(min(lower_outlier_limit), 5000)  # 设置为最小离群值到5000  
+        }  
+    } else if (microbe_type == "Vir") {  
+        # 计算四组的最大和最小离群值  
+        outlier_data <- boxplot.stats(alpha_diversity$Observed[alpha_diversity$group %in% c("C1/R", "C1/NR", "C2/R", "C2/NR")])  
+        if (length(outlier_data$out) == 0) {  
+            observed_ylim <- c(0, 10)  # 如果没有离群值，设置默认范围（根据数据调整）  
+        } else {  
+            observed_ylim <- c(min(outlier_data$out), max(outlier_data$out))  # 设置为最大和最小离群值  
+        }  
+    } else {  
+        observed_ylim <- range(alpha_diversity$Observed, na.rm = TRUE) + c(0, 15)  # 默认y轴范围  
+    }  
+    
+    # 增加箱线图的整体宽度  
+    color_palette <- c("#990026", "#CC6666", "#1e4e8a", "#6699CC")  # 自定义4个颜色  
+    
+    # 绘制 Observed Species 箱线图  
+    p1 <- ggplot(data = alpha_diversity, aes(x = group, y = Observed, group = group)) +  
+        geom_boxplot(aes(x = group, fill = group), width = 0.7) +  
+        stat_summary(aes(x = group), fun = mean, geom = "point", color = "white") +  
+        geom_jitter(width = 0.2, size = 1) +  
+        scale_fill_manual(values = color_palette) +  
+        theme_classic() +  
+        labs(title = "", y = "Observed Species", x = "") +  
+        coord_cartesian(ylim = observed_ylim)  
+
+    # 清除 p 值标签部分，只绘制箱线图  
+    # 保存 Observed Species 箱线图  
+    ggsave(filename = file.path(output_dir, paste0("Observed_C1_C2_R_NR_", microbe_type, ".png")), plot = p1, width = 5, height = 4, units = "in", dpi = 300)  
+    ggsave(filename = file.path(output_dir, paste0("Observed_C1_C2_R_NR_", microbe_type, ".pdf")), plot = p1, width = 5, height = 4, units = "in")  
+  
+    # Shannon 多样性分析 - 如果需要，也可在此处添加  
+    p_labels_shannon <- character(length(comparisons))  # 初始化为空字符向量  
+    
+    for (i in seq_along(comparisons)) {  
+        comparison <- comparisons[[i]]  
+        t_test <- t.test(Shannon ~ group, data = alpha_diversity[alpha_diversity$group %in% comparison, ])  
+        p_labels_shannon[i] <- ifelse(t_test$p.value < 0.001, "p < 0.001", paste("p =", formatC(t_test$p.value, digits = 3)))  
+    }  
+    
+    # 设置 Shannon y 轴范围  
+    shannon_ylim <- range(alpha_diversity$Shannon, na.rm = TRUE) + c(0, 0.7)  
+    
+    p2 <- ggplot(data = alpha_diversity, aes(x = group, y = Shannon, group = group)) +  
+        geom_boxplot(aes(x = group, fill = group), width = 0.7) +  
+        stat_summary(aes(x = group), fun = mean, geom = "point", color = "white") +  
+        geom_jitter(width = 0.2, size = 1.5) +  
+        scale_fill_manual(values = color_palette) +  
+        theme_classic() +  
+        labs(title = "", y = "Shannon Index", x = "") +  
+        coord_cartesian(ylim = shannon_ylim)  
+
+    # 添加 p 值标签  
+    for (i in seq_along(p_labels_shannon)) {  
+        comparison <- comparisons[[i]]  
+        x_position <- mean(c(which(levels(alpha_diversity$group) == comparison[1]),  
+                             which(levels(alpha_diversity$group) == comparison[2])))  
+        max_y <- max(alpha_diversity$Shannon[alpha_diversity$group %in% comparison])  
+        y_position <- max_y + 0.1 * diff(shannon_ylim)  # 提高 y 位置  
+        
+        p2 <- p2 + annotate("text", x = x_position, y = y_position,  
+                            label = p_labels_shannon[i], size = 3, hjust = 0.5)  
+    }  
+    
+    # 保存 Shannon 指数箱线图  
+    ggsave(filename = file.path(output_dir, paste0("Shannon_C1_C2_R_NR_", microbe_type, ".png")), plot = p2, width = 5, height = 4, units = "in", dpi = 300)  
+    ggsave(filename = file.path(output_dir, paste0("Shannon_C1_C2_R_NR_", microbe_type, ".pdf")), plot = p2, width = 5, height = 4, units = "in")  
+    
+    ## beta 多样性分析  
+    # 数据预处理：过滤低丰度的 OTU  
+    min_abundance <- 0.001  
+    physeq_filtered <- filter_taxa(physeq, function(x) sum(x > min_abundance * sum(x)) > 0, prune = TRUE)  
+    
+    # 数据标准化：转换为相对丰度  
+    physeq_rel <- transform_sample_counts(physeq_filtered, function(x) x / sum(x))  
+    
+    # 将 sample_data 转换为 data.frame  
+    sample_data_df <- data.frame(sample_data(physeq_rel))  
+    
+    # 确保 group 列是因子类型  
+    sample_data_df$group <- factor(sample_data_df$group)  
+    sample_data_df <- sample_data_df[!is.na(sample_data_df$group), ]  
+    
+    # 距离矩阵计算 (Bray-Curtis 和 Jaccard)  
+    bray_dist <- phyloseq::distance(physeq_rel, method = "bray")  
+    jaccard_dist <- phyloseq::distance(physeq_rel, method = "jaccard")  
+    
+    # PERMANOVA 分析 (Bray-Curtis)  
+    adonis_bray <- adonis2(bray_dist ~ group, data = sample_data_df, permutations = 999)  
+    # PERMANOVA 分析 (Jaccard)  
+    adonis_jaccard <- adonis2(jaccard_dist ~ group, data = sample_data_df, permutations = 999)  
+    
+    # 输出 PERMANOVA 统计报告  
+    cat("Bray-Curtis PERMANOVA 统计报告 (C1内 R/NR):\n")  # 明确报告内容  
+    print(adonis_bray)  
+    cat("\nJaccard PERMANOVA 统计报告 (C2内 R/NR):\n")  
+    print(adonis_jaccard)  
+    
+    # 提取 PERMANOVA 的 p 值  
+    p_value_bray <- adonis_bray[["Pr(>F)"]][1]  
+    p_value_jaccard <- adonis_jaccard[["Pr(>F)"]][1]  
+    
+    # 获取 C1和C2的p值标签    
+    p_label_bray <- ifelse(p_value_bray < 0.01, "p < 0.01", paste("p =", formatC(p_value_bray, digits = 3)))  
+    p_label_jaccard <- ifelse(p_value_jaccard < 0.01, "p < 0.01", paste("p =", formatC(p_value_jaccard, digits = 3)))  
+    
+    # PCoA 分析 (Bray-Curtis)  
+    GP.ord_bray <- ordinate(physeq_rel, "PCoA", "bray")  
+    data1_bray <- plot_ordination(physeq_rel, GP.ord_bray, color = "group")  
+    data2_bray <- data1_bray$data  
+    
+    # 绘制 PCoA 图 (Bray-Curtis)  
+    p4_bray <- ggscatter(data2_bray, x = "Axis.1", y = "Axis.2",  
+                         color = "group", palette = color_palette,  
+                         ellipse = TRUE, size = 1, ellipse.level = 0.3,  
+                         mean.point = FALSE, star.plot = FALSE,  
+                         ggtheme = theme_minimal(),  
+                         rug = FALSE) +  
+        xlab(data1_bray[["labels"]][["x"]]) + ylab(data1_bray[["labels"]][["y"]]) +  
+        theme(axis.title.x = element_text(size = 16,  
+                                          face = "bold",  
+                                          vjust = 0.5,  
+                                          hjust = 0.5)) +  
+        theme(axis.title.y = element_text(size = 16,  
+                                          face = "bold",  
+                                          vjust = 0.5,  
+                                          hjust = 0.5)) +  
+        theme_bw() +  
+        labs(title = paste("C1:", p_label_bray, "C2:", p_label_jaccard))  # 设置标题为 "C1: p, C2: p"  
+    
+    # 保存 PCoA Bray-Curtis 图  
+    ggsave(filename = file.path(output_dir, paste0("C1_C2_R_NR_", microbe_type, ".png")), plot = p4_bray, width = 4, height = 3, units = "in", dpi = 300)  
+    ggsave(filename = file.path(output_dir, paste0("C1_C2_R_NR_", microbe_type, ".pdf")), plot = p4_bray, width = 4, height = 3, units = "in")  
+    
+    # PCoA 分析 (Jaccard)  
+    GP.ord_jaccard <- ordinate(physeq_rel, "PCoA", "jaccard")  
+    data1_jaccard <- plot_ordination(physeq_rel, GP.ord_jaccard, color = "group")  
+    data2_jaccard <- data1_jaccard$data  
+    
+    # 绘制 PCoA 图 (Jaccard)  
+    p4_jaccard <- ggscatter(data2_jaccard, x = "Axis.1", y = "Axis.2",  
+                            color = "group", palette = color_palette,  
+                            ellipse = TRUE, size = 1, ellipse.level = 0.3,  
+                            mean.point = FALSE, star.plot = FALSE,  
+                            ggtheme = theme_minimal(),  
+                            rug = FALSE) +  
+        xlab(data1_jaccard[["labels"]][["x"]]) + ylab(data1_jaccard[["labels"]][["y"]]) +  
+        theme(axis.title.x = element_text(size = 16,  
+                                          face = "bold",  
+                                          vjust = 0.5,  
+                                          hjust = 0.5)) +  
+        theme(axis.title.y = element_text(size = 16,  
+                                          face = "bold",  
+                                          vjust = 0.5,  
+                                          hjust = 0.5)) +  
+        theme_bw() +  
+        labs(title = paste("C1:", p_label_bray, "C2:", p_label_jaccard))  # 设置标题为 "C1: p, C2: p"  
+    
+    # 保存 Jaccard PCoA 图  
+    ggsave(filename = file.path(output_dir, paste0("C1_C2_R_NR_", microbe_type, "_Jaccard.png")), plot = p4_jaccard, width = 4, height = 3, units = "in", dpi = 300)  
+    ggsave(filename = file.path(output_dir, paste0("C1_C2_R_NR_", microbe_type, "_Jaccard.pdf")), plot = p4_jaccard, width = 4, height = 3, units = "in", dpi = 300)  
+    
+    # 删除中间变量  
+    rm(alpha_diversity, comparisons, p_labels_observed, p_labels_shannon)  # 移除无用变量  
+    rm(min_abundance, physeq_filtered, physeq_rel, sample_data_df, bray_dist, jaccard_dist, adonis_bray, adonis_jaccard, GP.ord_bray, data1_bray, data2_bray, p4_bray)  
+    rm(GP.ord_jaccard, data1_jaccard, data2_jaccard, p4_jaccard, p_value_bray, p_value_jaccard)  
+    rm(otu_table, sample_data, physeq)  
+    
+    cat(paste(microbe_type, "analysis completed.\n"))  
+}  
+process_microbiome_data(s_v, META, output_dirs$Vir, "Vir")  # 病毒
+# 应用函数处理每种微生物数据  
+process_microbiome_data(s_a, META, output_dirs$Arc, "Arc")  # 古菌  
+process_microbiome_data(s_b, META, output_dirs$Bac, "Bac")  # 细菌  
+process_microbiome_data(s_f, META, output_dirs$Fun, "Fun")  # 真菌  
+process_microbiome_data(s_v, META, output_dirs$Vir, "Vir")  # 病毒  
+process_microbiome_data(s, META, output_dirs$TOTAL, "TOTAL")  # 总微生物  
+
+```
+
+##差异物种s（C1/C2）
+```{r pressure, echo=FALSE}
+library(DESeq2)  
+library(phyloseq)  
+library(EnhancedVolcano)  
+library(openxlsx)  
+
+# 设置保存结果的目录  
+output_dir <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/enhance volcnao/s"  
+
+# 创建一个 workbook 用于保存 DESeq2 结果  
+wb <- createWorkbook()  
+
+# 定义一个函数来进行差异分析和火山图绘制  
+analyze_and_plot <- function(s_subset, kingdom_name, META) {  
+  # 检查 s_subset 是否为空  
+  if(nrow(s_subset) == 0){  
+    message(paste0("No data for ", kingdom_name, ". Skipping analysis."))  
+    return()  
+  }  
+
+  # 检查Cluster列是否为因子变量  
+  if (!is.factor(META$Cluster)) {  
+    # 如果不是因子变量，则将其转换为因子变量  
+    META$Cluster <- as.factor(META$Cluster)  
+    message("Cluster column converted to factor.")  
+  }  
+
+  # 检查Cluster列的levels  
+  cluster_levels <- levels(META$Cluster)  
+  print(paste0("Cluster levels: ", paste(cluster_levels, collapse = ", ")))  
+
+  # 创建 DESeq2 对象  
+  dds <- DESeqDataSetFromMatrix(countData = s_subset,  
+                                colData = META,  
+                                design = ~ Cluster)  
+
+  # 计算几何平均值  
+  gm_mean <- function(x, na.rm=TRUE){ exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))}  
+  geoMeans <- apply(counts(dds), 1, gm_mean)  
+  dds <- estimateSizeFactors(dds, geoMeans = geoMeans)  
+
+  # 差异表达分析  
+  dds <- DESeq(dds, test="Wald", fitType="parametric")  
+
+  # 提取显著性结果  
+  # 确保比较的是 "2" vs "1"  
+  res <- results(dds, contrast=c("Cluster", levels(META$Cluster)[1], levels(META$Cluster)[2]), cooksCutoff = FALSE)  
+  alpha <- 1  
+  sigtab <- res[which(res$padj < alpha), ]  
+
+  # 将显著性结果与物种名称合并  
+  if(nrow(sigtab) > 0){  
+    sigtab <- cbind(as(sigtab, "data.frame"), species = rownames(sigtab))  
+
+    # 准备火山图数据  
+    theme_set(theme_bw())  
+    scale_fill_discrete <- function(palname = "Set1", ...) {  
+      scale_fill_brewer(palette = palname, ...)  
+    }  
+
+    x <- tapply(sigtab$baseMean, sigtab$species, function(x) max(x))  
+    x <- rev(sort(x, TRUE))  
+    sigtab$species <- factor(as.character(sigtab$species), levels=names(x))  
+
+    # 设置火山图参数  
+    xlim <- c(-4, 4)  
+    FCcutoff <- 1  
+
+    # 针对 A, F, V 修改火山图参数  
+    if (kingdom_name %in% c("A", "F", "V")) {  
+      xlim <- c(-2, 2)  
+      FCcutoff <- 0.5  
+    }  
+
+    # 绘制火山图  
+    volcano_plot <- EnhancedVolcano(sigtab,  
+                                    lab = sigtab$species,  
+                                    x = 'log2FoldChange',  
+                                    y = 'padj',  
+                                    xlim = xlim,  
+                                    title = 'C1 versus C2',  
+                                    pCutoff = 0.05,  
+                                    FCcutoff = FCcutoff,  
+                                    labSize = 2)  
+
+    # 保存火山图为 PNG 格式  
+    png_filename <- file.path(output_dir, paste0(kingdom_name, "_volcano_plot.png"))  
+    png(filename = png_filename, width = 7, height = 5, units = "in", res = 600)  
+    print(volcano_plot)  
+    dev.off()  
+
+    # 保存火山图为 PDF 格式  
+    pdf_filename <- file.path(output_dir, paste0(kingdom_name, "_volcano_plot.pdf"))  
+    pdf(file = pdf_filename, width = 7, height = 5)  
+    print(volcano_plot)  
+    dev.off()  
+
+    # 保存 DESeq2 结果到 Excel 工作表  
+    addWorksheet(wb, sheetName = kingdom_name)  
+    writeData(wb, sheet = kingdom_name, sigtab)  
+
+    # 删除中间变量  
+    rm(dds, res, sigtab, x, volcano_plot, png_filename, pdf_filename, xlim, FCcutoff, gm_mean, geoMeans, alpha)  
+    gc()  
+  } else {  
+    message(paste0("No significant results found for ", kingdom_name, ". Skipping volcano plot and DESeq2 result saving."))  
+  }  
+}  
+
+# 示例数据  
+# 假设 s_a, s_b, s_f, s_v 已经定义  
+# 并且 META 数据框也已经定义  
+
+# 对每个界进行分析和绘图  
+analyze_and_plot(s_a, "A", META)  
+analyze_and_plot(s_b, "B", META)  
+analyze_and_plot(s_f, "F", META)  
+analyze_and_plot(s_v, "V", META)  
+
+# 保存 Excel 文件  
+excel_filename <- file.path(output_dir, "DESeq2_results.xlsx")  
+saveWorkbook(wb, excel_filename, overwrite = TRUE)  
+
+# 删除中间函数和 workbook 对象  
+rm(wb, excel_filename, output_dir)  
+gc()  
+```
+
+
+##合并s-g
+```{r pressure, echo=FALSE}
+library(dplyr)  
+library(stringr)  
+
+# 假设你的物种丰度数据框名为 's'，taxonomy 数据框名为 'taxonomy'  
+# s 数据框的行是物种，命名规则为 kingdom_种名，列是样本  
+# taxonomy 数据框的 g 列是属名，s 列是种名，命名规则为 g__属名 和 s__种名  
+
+# 重新加载 s 数据框 (如果需要)  
+# s <- read.csv("your_s_data.csv", row.names = 1) # 替换为你的 s 数据框的文件名  
+
+# 检查 s 数据框是否为空  
+if (nrow(s) == 0) {  
+  stop("Error: The 's' data frame is empty.")  
+}  
+
+# 删除已存在的列  
+if ("species" %in% colnames(s)) {  
+  s <- s %>% select(-species)  
+}  
+if ("kingdom" %in% colnames(s)) {  
+  s <- s %>% select(-kingdom)  
+}  
+if ("species_name" %in% colnames(s)) {  
+  s <- s %>% select(-species_name)  
+}  
+
+# 创建数据框的副本  
+s_copy <- s %>% tibble::rownames_to_column("species")  
+taxonomy_copy <- taxonomy  
+
+# 获取样本列的列名  
+sample_cols <- colnames(s)  
+
+# 提取种的 kingdom 和种名  
+s_copy <- s_copy %>%  
+  mutate(kingdom = substr(species, 1, 1),  
+         species_name = str_replace(species, "^[A-Z]_", ""))  # 使用正则表达式  
+
+# 从 taxonomy_copy$s 中删除点号  
+taxonomy_copy <- taxonomy_copy %>%  
+  mutate(s = str_replace_all(s, "\\.", ""))  
+
+# 从 taxonomy_copy$s 中删除 "s__" 前缀  
+taxonomy_copy <- taxonomy_copy %>%  
+  mutate(s = str_replace(s, "^s__", ""))  
+
+# 简短检查：查看 s_copy 的前 5 行和前 5 列  
+print("Head of s_copy:")  
+print(s_copy[1:5, 1:5])  
+
+# 简短检查：查看 taxonomy_copy$s 的前几个值  
+print("Head of taxonomy_copy$s (after removing dots and prefix):")  
+print(head(taxonomy_copy$s))  
+
+# 使用 left_join 代替 merge  
+merged_data <- left_join(s_copy, taxonomy_copy, by = c("species_name" = "s"))  
+
+# 简短检查：查看 merged_data 的前 5 行和前 5 列 (合并前)  
+print("Head of merged_data (before filtering):")  
+print(merged_data[1:5, 1:5])  
+
+# 过滤掉 taxonomy 数据框中没有记录属名的种  
+merged_data <- merged_data %>%  
+  filter(!is.na(g))  
+
+# 简短检查：查看 merged_data 的前 5 行和前 5 列 (过滤后)  
+print("Head of merged_data (after filtering):")  
+print(merged_data[1:5, 1:5])  
+
+# 提取属的 kingdom 和属名  
+merged_data <- merged_data %>%  
+  mutate(genus = paste0(kingdom, "_", gsub("g__", "", g)))  
+
+# 按照属名对样本丰度进行求和  
+g <- merged_data %>%  
+  group_by(genus) %>%  
+  summarise_at(vars(one_of(sample_cols)), sum)  
+
+# 简短检查：查看 g 的前 5 行和前 5 列 (设置行名前)  
+print("Head of g (before row names):")  
+print(g[1:5, 1:5])  
+
+# 将属名设置为行名  
+#rownames(g) <- g$genus # 避免直接设置行名  
+g <- g %>%  
+  tibble::column_to_rownames("genus") %>%  # 将 genus 列转换为行名  
+  select_if(~ !any(is.na(.))) # 删除包含NA的列  
+
+# 简短检查：查看 g 的前 5 行和前 5 列 (最终)  
+print("Head of g (final):")  
+print(g[1:5, 1:5])  
+
+# 删除中间变量  
+rm(s_copy, taxonomy_copy, merged_data, sample_cols)  
+gc() # 运行垃圾回收  
+```
+
+
+
+##差异物种g（C1/C2）
+```{r pressure, echo=FALSE}
+library(DESeq2)  
+library(phyloseq)  
+library(EnhancedVolcano)  
+library(openxlsx) # 确保安装 openxlsx 包  
+
+# 设置保存结果的目录  
+output_dir <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/enhance volcnao/g"  
+# 拆分 g 数据框、
+g_a <- g[grepl("^A_", rownames(g)), ]  
+g_b <- g[grepl("^B_", rownames(g)), ] 
+g_f <- g[grepl("^F_", rownames(g)), ] 
+g_v <- g[grepl("^V_", rownames(g)), ]
+g_v <- g_v[-c(1, (nrow(g_v)-3):nrow(g_v)), ] +1
+# 假设你的物种丰度数据框名为 'g'，样本元数据框名为 'META'  
+# 并且 META 数据框的 'Cluster' 列包含样本的分组信息  
+
+# 创建一个 workbook 用于保存 DESeq2 结果  
+wb <- createWorkbook()  
+
+# 定义一个函数来进行差异分析和火山图绘制  
+analyze_and_plot <- function(g_subset, kingdom_name, META) {  
+  # 检查Cluster列是否为因子变量  
+  if (!is.factor(META$Cluster)) {  
+    META$Cluster <- as.factor(META$Cluster)  
+    message("Cluster column converted to factor.")  
+  }  
+
+  # 检查Cluster列的levels  
+  cluster_levels <- levels(META$Cluster)  
+  print(paste0("Cluster levels: ", paste(cluster_levels, collapse = ", ")))  
+
+  # 创建 DESeq2 对象  
+  dds <- DESeqDataSetFromMatrix(countData = g_subset,  
+                                colData = META,  
+                                design = ~ Cluster)  
+
+  # 计算几何平均值  
+  gm_mean <- function(x, na.rm=TRUE){ exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))}  
+  geoMeans <- apply(counts(dds), 1, gm_mean)  
+  dds <- estimateSizeFactors(dds, geoMeans = geoMeans)  
+
+  # 差异表达分析  
+  dds <- DESeq(dds, test="Wald", fitType="parametric")  
+
+  # 提取显著性结果  
+  res <- results(dds, contrast=c("Cluster", "1", "2"), cooksCutoff = FALSE)  
+  alpha <- 0.05  # 调整为 p 值阈值  
+  sigtab <- res[which(res$padj < alpha), ]  
+    
+    # 将显著性结果与物种名称合并  
+    sigtab <- cbind(as(sigtab, "data.frame"), species = rownames(sigtab))  
+
+    # 准备火山图数据  
+    theme_set(theme_bw())  
+    scale_fill_discrete <- function(palname = "Set1", ...) {  
+      scale_fill_brewer(palette = palname, ...)  
+    }  
+
+    x <- tapply(sigtab$baseMean, sigtab$species, function(x) max(x))  
+    x <- rev(sort(x, TRUE))  
+    sigtab$species <- factor(as.character(sigtab$species), levels=names(x))  
+
+    # 设置火山图参数  
+    xlim <- c(-4, 4)  
+    FCcutoff <- 1  
+
+    # 针对 A, F, V 修改火山图参数  
+    if (kingdom_name %in% c("A")) {  
+      xlim <- c(-2, 2)  
+      y_limits <- c(0, 30)  
+      FCcutoff <- 0.5  
+    }   
+    if (kingdom_name %in% c("B")) {  
+      y_limits <- c(0, 220)  
+      FCcutoff <- 1  
+    }     
+    if (kingdom_name %in% c("F")) {  
+      xlim <- c(-1.5, 1.5)  
+      y_limits <- c(0, 35)  
+      FCcutoff <- 0.5  
+    }   
+    if (kingdom_name %in% c("V")) {  
+      xlim <- c(-1.5,1.5)  
+      y_limits <- c(0, 10)  
+      FCcutoff <- 0.25  
+    }   
+    # 绘制火山图  
+    volcano_plot <- EnhancedVolcano(sigtab,  
+                                    lab = sigtab$species,  
+                                    x = 'log2FoldChange',  
+                                    y = 'padj',  
+                                    xlim = xlim,  
+                                    ylim = y_limits,  
+                                    title = paste('C1 versus C2 for', kingdom_name),  # 修改标题  
+                                    pCutoff = 0.05,  
+                                    FCcutoff = FCcutoff,  
+                                    labSize = 2,  
+                                    colAlpha = 1 - sigtab$padj) # 设置颜色饱和度与p.adj成反比  
+  # 计算差异物种数量（红色物种）  
+  if (nrow(sigtab) > 0) {  
+    # 计算在火山图上显示为红色的物种数量  
+    significant_count <- sum(abs(sigtab$log2FoldChange) > FCcutoff)  # 根据 fold change cutoff 进行计算  
+    cat(paste0("Number of significant species shown in red on volcano plot for ", kingdom_name, ": ", significant_count, "\n"))  
+    # 保存火山图为 PNG 格式  
+    png_filename <- file.path(output_dir, paste0(kingdom_name, "_volcano_plot.png"))  
+    png(filename = png_filename, width = 7, height = 5, units = "in", res = 600) # 提高分辨率  
+    print(volcano_plot)  
+    dev.off()  
+
+    # 保存火山图为 PDF 格式  
+    pdf_filename <- file.path(output_dir, paste0(kingdom_name, "_volcano_plot.pdf"))  
+    pdf(file = pdf_filename, width = 7, height = 5)  
+    print(volcano_plot)  
+    dev.off()  
+
+    # 保存 DESeq2 结果到 Excel 工作表  
+    addWorksheet(wb, sheetName = kingdom_name)  
+    writeData(wb, sheet = kingdom_name, sigtab)  
+
+    # 删除中间变量  
+    rm(dds, res, sigtab, x, volcano_plot, png_filename, pdf_filename, xlim, FCcutoff)  
+    gc() # 运行垃圾回收  
+  } else {  
+    message(paste0("No significant results found for ", kingdom_name, ". Skipping volcano plot and DESeq2 result saving."))  
+  }  
+}  
+
+# 对每个界进行分析和绘图  
+analyze_and_plot(g_a, "A", META)  
+analyze_and_plot(g_b, "B", META)  
+analyze_and_plot(g_f, "F", META)  
+analyze_and_plot(g_v, "V", META)  
+
+# 保存 Excel 文件  
+excel_filename <- file.path(output_dir, "DESeq2_results1.xlsx")  
+saveWorkbook(wb, excel_filename, overwrite = TRUE)  
+
+
+# 删除拆分后的数据框和 workbook 对象  
+rm(wb, excel_filename, output_dir)  
+gc() # 运行垃圾回收  
+
+
+```
+
+
+##差异物种g（R/NR）
+```{r pressure, echo=FALSE}
+library(DESeq2)  
+library(phyloseq)  
+library(EnhancedVolcano)  
+library(openxlsx)  
+
+# 设置保存结果的目录  
+output_dir <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/enhance volcnao/g/R_NR"  
+
+# 确保目录存在，如果不存在则创建  
+if (!dir.exists(output_dir)) {  
+  dir.create(output_dir, recursive = TRUE)  
+}  
+
+# 创建一个 workbook 用于保存 DESeq2 结果  
+wb <- createWorkbook()  
+
+# 定义一个函数来进行差异分析和火山图绘制  
+analyze_and_plot <- function(g_subset, kingdom_name, META) {  
+  # 创建 DESeq2 对象  
+  dds <- DESeqDataSetFromMatrix(countData = g_subset,  
+                                colData = META,  
+                                design = ~ Response)  # 修改 design 公式  
+
+  # 计算几何平均值  
+  gm_mean <- function(x, na.rm=TRUE){ exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))}  
+  geoMeans <- apply(counts(dds), 1, gm_mean)  
+  dds <- estimateSizeFactors(dds, geoMeans = geoMeans)  
+
+  # 差异表达分析  
+  dds <- DESeq(dds, test="Wald", fitType="parametric")  
+
+  # 提取显著性结果  
+  res <- results(dds, cooksCutoff = FALSE)  
+  alpha <- 1  
+  sigtab <- res[which(res$padj < alpha), ]  
+
+  # 将显著性结果与物种名称合并  
+  if(nrow(sigtab) > 0){  
+    sigtab <- cbind(as(sigtab, "data.frame"), species = rownames(sigtab))  
+
+    # 准备火山图数据  
+    theme_set(theme_bw())  
+    scale_fill_discrete <- function(palname = "Set1", ...) {  
+      scale_fill_brewer(palette = palname, ...)  
+    }  
+
+    x <- tapply(sigtab$baseMean, sigtab$species, function(x) max(x))  
+    x <- rev(sort(x, TRUE))  
+    sigtab$species <- factor(as.character(sigtab$species), levels=names(x))  
+
+    # 设置火山图参数  
+    xlim <- c(-4, 4)  
+    FCcutoff <- 1  
+
+    # 针对 A, F, V 修改火山图参数  
+    if (kingdom_name %in% c("A", "F", "V")) {  
+      xlim <- c(-2, 2)  
+      FCcutoff <- 0.5  
+    }  
+
+    # 绘制火山图  
+    volcano_plot <- EnhancedVolcano(sigtab,  
+                                    lab = sigtab$species,  
+                                    x = 'log2FoldChange',  
+                                    y = 'padj',  
+                                    xlim = xlim,  
+                                    title = paste0(kingdom_name, ': Responder versus Non-Responder'), # 修改标题  
+                                    pCutoff = 0.05,  
+                                    FCcutoff = FCcutoff,  
+                                    labSize = 2)  
+
+    # 保存火山图为 PNG 格式  
+    png_filename <- file.path(output_dir, paste0(kingdom_name, "_R_vs_NR_volcano_plot.png"))  # 修改文件名  
+    png(filename = png_filename, width = 7, height = 5, units = "in", res = 600)  
+    print(volcano_plot)  
+    dev.off()  
+
+    # 保存火山图为 PDF 格式  
+    pdf_filename <- file.path(output_dir, paste0(kingdom_name, "_R_vs_NR_volcano_plot.pdf"))  # 修改文件名  
+    pdf(file = pdf_filename, width = 7, height = 5)  
+    print(volcano_plot)  
+    dev.off()  
+
+    # 保存 DESeq2 结果到 Excel 工作表  
+    addWorksheet(wb, sheetName = kingdom_name)  
+    writeData(wb, sheet = kingdom_name, sigtab)  
+
+    # 删除中间变量  
+    rm(dds, res, sigtab, x, volcano_plot, png_filename, pdf_filename, xlim, FCcutoff)  
+    gc() # 运行垃圾回收  
+  } else {  
+    message(paste0("No significant results found for ", kingdom_name, ". Skipping volcano plot and DESeq2 result saving."))  
+  }  
+}  
+
+# 拆分 g 数据框  
+g_a <- g[grepl("^A_", rownames(g)), ]  
+g_b <- g[grepl("^B_", rownames(g)), ]  
+g_f <- g[grepl("^F_", rownames(g)), ]  
+g_v <- g[grepl("^V_", rownames(g)), ]  
+
+# 对每个界进行分析和绘图  
+analyze_and_plot(g_a, "A", META)  
+analyze_and_plot(g_b, "B", META)  
+analyze_and_plot(g_f, "F", META)  
+analyze_and_plot(g_v, "V", META)  
+
+# 保存 Excel 文件  
+excel_filename <- file.path(output_dir, "DESeq2_results_R_vs_NR.xlsx")  # 修改文件名  
+saveWorkbook(wb, excel_filename, overwrite = TRUE)  
+
+# 删除拆分后的数据框和 workbook 对象  
+rm(g_a, g_b, g_f, g_v, wb, excel_filename, output_dir)  
+gc() # 运行垃圾回收
+```
+##差异物种在R/NR有无关联性
+```{r pressure, echo=FALSE}
+library(DESeq2)  
+library(ggplot2)  
+library(openxlsx)  
+library(ggrepel)  # 用于美化标签  
+library(dplyr)    # 用于数据处理  
+
+# 设置保存结果的目录  
+output_dir <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/D"  
+
+# 创建一个 workbook 用于保存 DESeq2 结果  
+wb <- createWorkbook()  
+
+# 定义一个函数来进行差异分析和火山图绘制  
+analyze_and_plot <- function(g_subset, kingdom_name, META) {  
+  # 确保 Cluster 和 Response 都是因子  
+  META$Cluster <- factor(META$Cluster)  
+  META$Response <- factor(META$Response)  
+
+  # 拆分数据，分别获取 C1 和 C2 的数据  
+  g_subset_c1 <- g_subset[, META$Cluster == "1"]  
+  g_subset_c2 <- g_subset[, META$Cluster == "2"]  
+  META_c1 <- META[META$Cluster == "1", ]  
+  META_c2 <- META[META$Cluster == "2", ]   
+
+  # -------------------- C1 分析 --------------------  
+  dds_c1 <- DESeqDataSetFromMatrix(countData = g_subset_c1,  
+                                    colData = META_c1,  
+                                    design = ~ Response)  
+
+  gm_mean <- function(x, na.rm = TRUE) {   
+    exp(sum(log(x[x > 0]), na.rm = na.rm) / length(x))  
+  }  
+  geoMeans <- apply(counts(dds_c1), 1, gm_mean)  
+  dds_c1 <- estimateSizeFactors(dds_c1, geoMeans = geoMeans)  
+  dds_c1 <- DESeq(dds_c1, test = "Wald", fitType = "parametric")  
+
+  res_c1 <- tryCatch({  
+    results(dds_c1, contrast = c("Response", "Responder", "Non_Responder"), cooksCutoff = FALSE)  
+  }, error = function(e) {  
+    print(paste("Error in results(dds_c1):", e$message))  
+    return(NULL)  
+  })  
+
+  if (is.null(res_c1)) {  
+    print("Skipping C1 analysis due to error in results().")  
+    sigtab_c1 <- NULL  
+  } else {  
+    sigtab_c1 <- as.data.frame(res_c1)  
+    sigtab_c1$species <- rownames(sigtab_c1)  
+    sigtab_c1 <- sigtab_c1[, c("species", "log2FoldChange", "padj")]  
+    colnames(sigtab_c1) <- c("species", "log2FoldChange_C1", "padj_C1")  
+  }  
+
+  # -------------------- C2 分析 --------------------  
+  dds_c2 <- DESeqDataSetFromMatrix(countData = g_subset_c2,  
+                                    colData = META_c2,  
+                                    design = ~ Response)  
+
+  geoMeans <- apply(counts(dds_c2), 1, gm_mean)  
+  dds_c2 <- estimateSizeFactors(dds_c2, geoMeans = geoMeans)  
+  dds_c2 <- DESeq(dds_c2, test = "Wald", fitType = "parametric")  
+
+  res_c2 <- tryCatch({  
+    results(dds_c2, contrast = c("Response", "Responder", "Non_Responder"), cooksCutoff = FALSE)  
+  }, error = function(e) {  
+    print(paste("Error in results(dds_c2):", e$message))  
+    return(NULL)  
+  })  
+
+  if (is.null(res_c2)) {  
+    print("Skipping C2 analysis due to error in results().")  
+    sigtab_c2 <- NULL  
+  } else {  
+    sigtab_c2 <- as.data.frame(res_c2)  
+    sigtab_c2$species <- rownames(sigtab_c2)  
+    sigtab_c2 <- sigtab_c2[, c("species", "log2FoldChange", "padj")]  
+    colnames(sigtab_c2) <- c("species", "log2FoldChange_C2", "padj_C2")  
+  }  
+
+  # -------------------- 合并结果 --------------------  
+  if (is.null(sigtab_c1) || is.null(sigtab_c2)) {  
+    print("Skipping merging due to error in C1 or C2 analysis.")  
+    merged_data <- NULL  
+  } else {  
+    merged_data <- merge(sigtab_c1, sigtab_c2, by = "species", all = TRUE)  
+    merged_data <- na.omit(merged_data)  # 去除缺失值  
+  }  
+
+  # -------------------- 火山图 --------------------  
+  if (is.null(merged_data)) {  
+    print("Skipping volcano plot due to error in merging.")  
+  } else {  
+    # 设置火山图参数  
+      xlim <- c(-2, 2)  
+      ylim <- c(-2, 2)  
+      FCcutoff <- 0.25  
+    # 确定物种颜色  
+    merged_data$significance <- "Not Significant"  
+    
+    # 显著物种判定  
+    merged_data$significance[merged_data$padj_C1 < 0.5 & abs(merged_data$log2FoldChange_C1) > 1] <- "C1"  
+    merged_data$significance[merged_data$padj_C2 < 0.5 & abs(merged_data$log2FoldChange_C2) > 1] <- "C2"  
+    merged_data$significance[merged_data$padj_C1 < 0.5 & abs(merged_data$log2FoldChange_C1) > 1 &   
+                              merged_data$padj_C2 < 0.5 & abs(merged_data$log2FoldChange_C2) > 1] <- "Both"  
+
+    # 创建火山图  
+    volcano_plot <- ggplot(merged_data, aes(x = log2FoldChange_C1, y = log2FoldChange_C2)) +  
+      geom_point(aes(color = significance), size = 1) +  
+      scale_color_manual(values = c("Not Significant" = "black",   
+                                     "C1" = "red",   
+                                     "C2" = "blue",   
+                                     "Both" = "purple")) +  
+      xlim(xlim) +  
+      ylim(ylim) +  
+      geom_vline(xintercept = c(-FCcutoff, FCcutoff), color = "gray", linetype = "dashed") +  
+      geom_hline(yintercept = c(-FCcutoff, FCcutoff), color = "gray", linetype = "dashed") +  
+      labs(x = "log2FC (C1: R vs NR)",  
+           y = "log2FC (C2: R vs NR)") +  
+      theme_bw() +  
+      theme(plot.title = element_blank(),  
+            legend.position = "right") +  # 显示图例  
+      guides(color = guide_legend(override.aes = list(size = 3)))   
+
+    # 添加物种名称，仅对显著物种，标签大小为2  
+    if (nrow(merged_data[merged_data$significance != "Not Significant", ]) > 0) {  
+      volcano_plot <- volcano_plot +  
+        geom_text_repel(data = merged_data[merged_data$significance != "Not Significant", ],  
+                        aes(label = species),  
+                        size = 2, na.rm = TRUE)    
+    }  
+
+    # 保存火山图为 PNG 格式  
+    png_filename <- file.path(output_dir, paste0(kingdom_name, "_C1_vs_C2_volcano_plot.png"))  
+    png(filename = png_filename, width = 7, height = 5, units = "in", res = 600)  
+    print(volcano_plot)  
+    dev.off()  
+
+    # 保存火山图为 PDF 格式  
+    pdf_filename <- file.path(output_dir, paste0(kingdom_name, "_C1_vs_C2_volcano_plot.pdf"))  
+    pdf(file = pdf_filename, width = 7, height = 5)  
+    print(volcano_plot)  
+    dev.off()  
+  }  
+
+  # 保存合并后的数据到 Excel 工作表  
+  if (!is.null(merged_data)) {  
+    addWorksheet(wb, sheetName = kingdom_name)  
+    writeData(wb, sheet = kingdom_name, merged_data)  
+  }  
+
+  # 删除中间变量  
+  rm(dds_c1, dds_c2, res_c1, res_c2, sigtab_c1, sigtab_c2, merged_data, volcano_plot, png_filename, pdf_filename, xlim, ylim, FCcutoff)  
+  gc() # 运行垃圾回收  
+}  
+
+# 拆分 g 数据框  
+g_a <- g[grepl("^A_", rownames(g)), ]  
+g_b <- g[grepl("^B_", rownames(g)), ]  
+g_f <- g[grepl("^F_", rownames(g)), ]  
+g_v <- g[grepl("^V_", rownames(g)), ]  
+
+# 删除 g_v 的最后五行  
+if (nrow(g_v) > 5) {  
+  g_v <- g_v[-((nrow(g_v) - 4):nrow(g_v)), ]  
+} else {  
+  print("g_v has 5 or fewer rows, so no rows were removed.")  
+}  
+
+# 对完整 g 数据框进行分析和绘图  
+analyze_and_plot(g, "Total", META)  # 在这一处使用完整的 g 数据框而不是拆分版  
+
+# 保存 Excel 文件  
+excel_filename <- file.path(output_dir, "DESeq2_results.xlsx")  
+saveWorkbook(wb, excel_filename, overwrite = TRUE)  
+
+# 删除 workbook 对象  
+rm(wb, excel_filename, output_dir)  
+gc() # 运行垃圾回收  
+
+
+```
+
+
+##动态分型
+```{r pressure, echo=FALSE}
+# 加载必要的库  
+library(dplyr)  
+library(ggplot2)  
+library(tidyr)  
+library(ggalluvial)  
+
+# 数据清洗和汇总  
+met_summary <- met %>%  
+  mutate(SPT = ifelse(is.na(SPT), "Non_Baseline", SPT)) %>%  
+  filter(!is.na(Sampling_Timepoint)) %>%  
+  group_by(SPT, Sampling_Timepoint, Cluster) %>%  
+  summarise(Count = n(), .groups = "drop") %>%  
+  mutate(Percentage = Count / sum(Count) * 100) %>%  
+  distinct(SPT, Sampling_Timepoint, Cluster, Percentage, .keep_all = TRUE)  
+
+# 检查唯一性  
+unique_values(met_summary)  
+
+# 生成颜色映射  
+colors_spt <- setNames(c("#f2a7ad", "#fac5a8"), unique(met_summary$SPT))  
+colors_sampling_timepoint <- setNames(c("#F5E4C8", "#D6CDBE", "#c2bdde"), unique(met_summary$Sampling_Timepoint))  
+colors_cluster <- setNames(c("#ad002a", "#3b4992"), unique(met_summary$Cluster))  
+
+# 绘制全uvial图  
+ggplot(met_summary,   
+       aes(axis1 = SPT, axis2 = Sampling_Timepoint, axis3 = Cluster, y = Percentage)) +  
+  geom_alluvium(aes(fill = SPT), stat = "alluvium") +  
+  geom_stratum(aes(fill = Sampling_Timepoint), color = "black") +  
+  geom_stratum(aes(fill = Cluster), color = "black") +  
+  geom_text(stat = "stratum", aes(label = ""), show.legend = FALSE) +  
+  
+  scale_fill_manual(values = c(colors_spt, colors_sampling_timepoint)) +  
+  scale_color_manual(values = colors_cluster) +  
+  
+  labs(title = "Cluster Stability Across SPT and Sampling Timepoints",  
+       x = "SPT and Sampling Timepoint",  
+       y = "Percentage (%)") +  
+  theme_minimal() +  
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +  
+  scale_x_discrete(labels = NULL)
+```
+
+
+```{r pressure, echo=FALSE}
+# 加载所需的库  
+library(randomForest)  
+library(caret)  
+library(dplyr)  
+library(ggplot2)  
+library(doParallel)  
+library(pheatmap)  
+library(Matrix)  
+
+
+```
+
+
+
+
+
+
+##C1-g
+```{r pressure, echo=FALSE}
+# 合并s-g水平，用于fastspar  
+# 假设otu_s_C1是您的OTU数据框，第一列是种名，带有原始前缀 (A, B, F, V)  
+# tax 是记录种（s_列）和属（g_列）的分类数据框  
+
+# 1. 提取otu_s_C1的第一列OTU名 (种名)  
+otu_names <- otu_s_C1[, 1, drop = FALSE]  
+
+# 提取原始前缀 (A, B, F, V)  
+original_prefixes <- sub("^(A|B|F|V)_(.*)$", "\\1", otu_names[, 1])  
+
+# 提取种水平OTU名称 (不包含前缀)  
+species_names <- sub("^(A|B|F|V)_(.*)$", "\\2", otu_names[, 1])  
+
+# 2. 在tax数据框设置种-属映射  
+# 为所有种水平OTU名称添加 "s__" 前缀  
+species_names_with_prefix <- paste0("s__", species_names)  
+
+# 检查 species_names_with_prefix 是否全部存在于 tax$s 中  
+missing_species <- species_names_with_prefix[!(species_names_with_prefix %in% tax$s)]  
+
+# 找到需要删除的索引  
+indices_to_remove <- which(species_names_with_prefix %in% missing_species)  
+
+# 删除不在 tax$s 中的种名，并同步删除 original_prefixes  
+if (length(indices_to_remove) > 0) {  
+  species_names_with_prefix <- species_names_with_prefix[-indices_to_remove]  
+  original_prefixes <- original_prefixes[-indices_to_remove]  
+  species_names <- species_names[-indices_to_remove]  
+}  
+
+# 创建种名到属名的映射  
+if ("g" %in% colnames(tax) && "s" %in% colnames(tax) && length(tax$g) == length(tax$s)) {  
+  mapping_genus <- setNames(tax$g, tax$s)  
+} else {  
+  stop("tax 数据框的结构不正确，请检查 g 列和 s 列是否存在且长度相同。")  
+}  
+
+# 获取对应的属名  
+genus_names <- mapping_genus[species_names_with_prefix]  
+
+# 将无法匹配到属名的OTU替换为 "未分类"  
+genus_names[is.na(genus_names)] <- "g__Unclassified"  
+
+# 提取不带 "g__" 前缀的属名  
+genus_names_no_prefix <- sub("^g__", "", genus_names)  
+
+# 获取otu_s_C1的丰度信息  
+otu_counts <- otu_s_C1[, -1, drop = FALSE]  
+
+# 创建包含属名和丰度信息的数据框  
+otu_data <- data.frame(Genus = genus_names_no_prefix,  
+                       otu_counts[1:length(genus_names), ,drop = FALSE], # 确保otu_counts只取到需要的行数  
+                       check.names = FALSE)  
+
+# 检查并清理 otu_data 中的非数值数据  
+for (col in 2:ncol(otu_data)) {  
+  # 查找非数值数据  
+  non_numeric_values <- !grepl("^[0-9.]+$", otu_data[, col])  
+  if (any(non_numeric_values)) {  
+    print(paste("列", col, "包含非数值数据，正在替换为 0..."))  
+    print(unique(otu_data[non_numeric_values, col]))  
+    # 将非数值数据替换为 0  
+    otu_data[non_numeric_values, col] <- 0  
+  }  
+  # 转换为数值型  
+  otu_data[, col] <- as.numeric(otu_data[, col])  
+}  
+
+# 确保 otu_data 在 aggregate 之前不为空  
+if (nrow(otu_data) == 0) {  
+  stop("otu_data 数据框为空，无法进行聚合。请检查数据处理过程。")  
+}  
+
+# 使用aggregate函数合并丰度  
+otu_g_C1 <- aggregate(. ~ Genus, data = otu_data, FUN = sum)  
+
+# 获取合并后的属名  
+merged_genus_names <- otu_g_C1$Genus  
+
+# **使用正确的原始前缀**  
+# 找到与合并后的属名对应的原始前缀  
+correct_original_prefixes <- original_prefixes[match(merged_genus_names, genus_names_no_prefix)]  
+
+# 构建最终的OTU名称  
+new_otu_names_genus <- paste0(correct_original_prefixes, "_", merged_genus_names)  
+
+# 将新的OTU名称替换到otu_g_C1数据框中  
+otu_g_C1$Genus <- new_otu_names_genus  
+
+# 将第一列的列名改为 #OTU ID  
+colnames(otu_g_C1)[1] <- "#OTU ID"  
+
+# 修改列名，确保不包含空格  
+colnames(otu_g_C1)[-1] <- paste0("Sample", 1:(ncol(otu_g_C1) - 1))  
+
+# **精确删除仅包含 "A_" 或 "B_" 或 "F_" 或 "V_" 的行**  
+prefixes_to_remove <- c("A_", "B_", "F_", "V_")  
+otu_g_C1 <- otu_g_C1[!(otu_g_C1$`#OTU ID` %in% prefixes_to_remove), ]  
+
+# 确认目录存在，如果不存在则创建  
+output_dir <- "/Users/qiaotong2023/Desktop/fastspar/g"  
+if (!dir.exists(output_dir)) {  
+  print(paste("目录", output_dir, "不存在，正在创建..."))  
+  dir.create(output_dir, recursive = TRUE)  # recursive = TRUE 可以创建多层目录  
+}  
+
+# 保存结果到TSV文件  
+output_file <- file.path(output_dir, "otu_g_fastspar_1.tsv") # 使用 file.path 拼接路径，更安全  
+write.table(otu_g_C1, file = output_file, sep = "\t", row.names = FALSE, quote = FALSE, col.names = TRUE, fileEncoding = "UTF-8")  
+
+print(paste("结果已保存到:", output_file))
+```
+
+##C2 s-g
+```{r pressure, echo=FALSE}
+# 导入 dplyr 包  
+library(dplyr)  
+
+# 定义文件路径  
+file_path <- "/Users/qiaotong2023/Desktop/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/结果1 分子分型-临床特征相关性/结果1 icb分型/Figure4/otu_cluster2_rarefied.csv"  
+
+# 导入CSV文件作为数据框  
+otu_s_C2 <- read.csv(file_path, header = TRUE)  
+
+# 假设otu_s_C2是您的OTU数据框，tax是记录种（s列）和属（g列）的分类数据框  
+
+# 1. 提取otu_s_C2的第一列otu名  
+otu_names <- otu_s_C2[, 1, drop = FALSE]  
+otu_names_vec <- otu_names[, 1] # 将 OTU 名称提取为向量  
+
+# 提取原始前缀 (A, B, F, V)  
+original_prefixes <- sub("^(A|B|F|V)_(.*)$", "\\1", otu_names_vec)  
+
+# 提取种水平OTU名称 (不包含前缀)  
+species_names <- sub("^(A|B|F|V)_(.*)$", "\\2", otu_names_vec)  
+
+# 2. 在tax数据框设置种-属映射  
+# 注意tax数据框的命名规则与otu_s_C2数据框不同，tax种g列和s列分别是g__属分类，s__种水平名。  
+# 为所有种水平OTU名称添加 "s__" 前缀  
+species_names_with_prefix <- paste0("s__", species_names)  
+
+# 检查 species_names_with_prefix 是否全部存在于 tax$s 中  
+missing_species <- species_names_with_prefix[!(species_names_with_prefix %in% tax$s)]  
+
+# 找到需要删除的索引  
+indices_to_remove <- which(species_names_with_prefix %in% missing_species)  
+
+# 删除不在 tax$s 中的种名，并同步删除 original_prefixes  
+if (length(indices_to_remove) > 0) {  
+  species_names_with_prefix <- species_names_with_prefix[-indices_to_remove]  
+  original_prefixes <- original_prefixes[-indices_to_remove]  
+  species_names <- species_names[-indices_to_remove] # Also remove from species_names  
+}  
+
+# 创建种名到属名的映射  
+# 确保 tax$g 和 tax$s 存在且长度相同  
+if ("g" %in% colnames(tax) && "s" %in% colnames(tax) && length(tax$g) == length(tax$s)) {  
+  mapping_genus <- setNames(tax$g, tax$s)  # 使用tax数据框的g列和s列  
+} else {  
+  stop("tax 数据框的结构不正确，请检查 g 列和 s 列是否存在且长度相同。")  
+}  
+
+# 获取对应的属名  
+genus_names <- mapping_genus[species_names_with_prefix]  
+
+# 找到需要删除的属名缺失的索引  
+indices_to_remove_genus <- which(is.na(genus_names))  
+
+# 删除属名缺失的种名，并同步删除 original_prefixes 和 species_names  
+if (length(indices_to_remove_genus) > 0) {  
+  species_names_with_prefix <- species_names_with_prefix[-indices_to_remove_genus]  
+  original_prefixes <- original_prefixes[-indices_to_remove_genus]  
+  species_names <- species_names[-indices_to_remove_genus]  
+  genus_names <- genus_names[-indices_to_remove_genus] # Also remove from genus_names  
+}  
+
+# 3. 这样就能从tax数据框找到otu_s_C2中种所在的属，进行丰度合并  
+# 获取otu_s_C2的丰度信息  
+otu_counts <- otu_s_C2[, -1, drop = FALSE]  
+
+# 提取不带 "g__" 前缀的属名  
+genus_names_no_prefix <- sub("^g__", "", genus_names)  
+
+# 创建包含属名和丰度信息的数据框  
+otu_data <- data.frame(Genus = genus_names_no_prefix, otu_counts[1:length(genus_names), , drop = FALSE], check.names = FALSE) # 确保 otu_counts 是数据框  
+
+# 使用aggregate函数合并丰度  
+otu_g_C2 <- aggregate(. ~ Genus, data = otu_data, FUN = sum) # 修改数据框名称  
+
+# 4.  添加原始前缀  
+# 创建一个包含属名和对应原始前缀的数据框  
+genus_prefix_df <- data.frame(  
+  Genus = unique(otu_data$Genus),  
+  Prefix = original_prefixes[!duplicated(genus_names_no_prefix)] # 确保前缀和属名一一对应  
+)  
+
+# 合并属名和前缀  
+otu_g_C2 <- merge(genus_prefix_df, otu_g_C2, by = "Genus", all.y = TRUE) # 修改数据框名称  
+
+# 构建最终的OTU名称  
+otu_g_C2$OTU_ID <- paste0(otu_g_C2$Prefix, "_", otu_g_C2$Genus) # 修改数据框名称  
+# 移除临时列  
+otu_g_C2$Genus <- NULL # 修改数据框名称  
+otu_g_C2$Prefix <- NULL # 修改数据框名称  
+
+# 将OTU名称设置为第一列  
+otu_g_C2 <- otu_g_C2[, c("OTU_ID", names(otu_g_C2)[names(otu_g_C2) != "OTU_ID"])] # 修改数据框名称  
+
+# 5. 将第一列的列名改为#OTU ID  
+colnames(otu_g_C2)[1] <- "#OTU ID" # 修改数据框名称  
+
+# 修改列名，确保不包含空格  
+colnames(otu_g_C2)[-1] <- paste0("Sample", 1:(ncol(otu_g_C2) - 1))  
+otu_g_C2 <- otu_g_C2[-1, ]  
+
+# 保存结果到TSV文件  
+output_dir <- "/Users/qiaotong2023/Desktop/fastspar/g"  
+output_file <- file.path(output_dir, "otu_g_fastspar_1.tsv") # 使用 file.path 拼接路径，更安全  
+write.table(otu_g_C2, file = output_file, sep = "\t", row.names = FALSE, quote = FALSE, col.names = TRUE, fileEncoding = "UTF-8")
+
+```
+
+
+##差异物种（条形图）
+```{r pressure, echo=FALSE}
+#一.加载包设置路径
+# 加载必要的包  
+library(DESeq2)  
+library(ggplot2)  
+library(openxlsx)  
+library(EnhancedVolcano)  
+
+# 设置保存路径  
+volcano_path <- "/Users/qiaotong2023/Desktop/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/结果1 分子分型-临床特征相关性/结果1 icb分型/Figure3/volcano_g"  
+histogram_path <- "/Users/qiaotong2023/Desktop/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/结果1 分子分型-临床特征相关性/结果1 icb分型/Figure3/histogram_g"  
+
+#分界、绘图、输出报告很长，先写函数再统一执行
+# 二. 差异分析和火山图绘制函数  
+diff_analysis_and_volcano <- function(otu_g, met, kingdom_prefix, filename_prefix) {  
+  # 选择以指定前缀开头的物种  
+  taxa_names <- rownames(otu_g)  
+  kingdom_taxa <- taxa_names[startsWith(taxa_names, kingdom_prefix)]  
+  
+  if (length(kingdom_taxa) == 0) {  
+    message(paste("No taxa found for", kingdom_prefix))  
+    return(NULL)  
+  }  
+  
+  # 过滤出对应界的OTU数据  
+  otu_subset <- otu_g[kingdom_taxa, , drop = FALSE]  
+  
+  # 确保样本名与分组信息匹配  
+  sample_ids <- colnames(otu_subset)  
+  response <- met$Cluster[match(sample_ids, met$SampleID)]  # 使用Cluster列进行分组  
+  
+  # 创建DESeq2数据集  
+  dds <- DESeqDataSetFromMatrix(countData = otu_subset,  
+                                colData = data.frame(Cluster = factor(response)),  # 确保Cluster为因子  
+                                design = ~ Cluster)  
+  # 进行差异分析  
+  dds <- DESeq(dds)  
+  res <- results(dds, cooksCutoff = FALSE)  
+  
+  # 过滤显著性结果  
+  alpha <- 0.05  
+  sigtab <- res[which(res$padj < alpha), ]  
+  if (nrow(sigtab) == 0) {  
+    message(paste("No significant taxa found for", kingdom_prefix))  
+    return(NULL)  
+  }  
+  
+  sigtab <- cbind(as.data.frame(sigtab), species = rownames(sigtab))  
+
+  # 绘制火山图  
+  png(file.path(volcano_path, paste0(filename_prefix, "_volcano_plot.png")), width = 7, height = 5, units = "in", res = 300)  
+  volcano_plot <- EnhancedVolcano(sigtab,  
+                                  lab = sigtab$species,  
+                                  x = "log2FoldChange",  
+                                  y = "padj",  
+                                  xlim = c(-4, 4),  
+                                  title = paste("Differential Analysis -", filename_prefix),  
+                                  pCutoff = alpha,  
+                                  FCcutoff = 1,  
+                                  labSize = 2)  
+  print(volcano_plot)  
+  dev.off()  
+  
+  return(sigtab)  
+}
+
+# 差异分析函数  
+perform_diff_analysis <- function(otu_g, met, kingdom_prefix) {  
+  # 选择以指定前缀开头的物种  
+  taxa_names <- rownames(otu_g)  
+  kingdom_taxa <- taxa_names[startsWith(taxa_names, kingdom_prefix)]  
+  
+  if (length(kingdom_taxa) == 0) {  
+    warning(paste("No taxa found for", kingdom_prefix))  
+    return(NULL)  
+  }  
+  
+  # 过滤出对应界的OTU数据  
+  otu_subset <- otu_g[kingdom_taxa, , drop = FALSE]  
+  
+  # 确保样本名与分组信息匹配  
+  sample_ids <- colnames(otu_subset)  
+  response <- met$Response[match(sample_ids, met$SampleID)]  
+  
+  # 创建DESeq2数据集  
+  dds <- DESeqDataSetFromMatrix(countData = otu_subset,  
+                                colData = data.frame(Response = response),  
+                                design = ~ Response)  
+
+  # 进行差异分析  
+  dds <- DESeq(dds)  
+  res <- results(dds, cooksCutoff = FALSE)  
+
+  # 将结果转换为数据框  
+  res_df <- as.data.frame(res)  
+  res_df$species <- rownames(res_df)  
+
+  # 分别获取上调和下调的物种  
+  up_regulated <- res_df[res_df$log2FoldChange > 0, ]  
+  down_regulated <- res_df[res_df$log2FoldChange < 0, ]  
+
+  # 分别按padj值排序  
+  up_regulated <- up_regulated[order(up_regulated$padj), ]  
+  down_regulated <- down_regulated[order(down_regulated$padj), ]  
+
+  # 各取前25个  
+  up_regulated <- head(up_regulated, 25)  
+  down_regulated <- head(down_regulated, 25)  
+
+  # 合并结果  
+  sigtab <- rbind(up_regulated, down_regulated)  
+  rownames(sigtab) <- sigtab$species  
+  sigtab$species <- NULL  
+
+  if(nrow(sigtab) == 0) {  
+    warning("No significant differences found.")  
+    return(NULL)  
+  }  
+
+  # 绘制条形图  
+  p <- ggplot(sigtab, aes(x = log2FoldChange, y = reorder(rownames(sigtab), log2FoldChange))) +  
+    geom_bar(stat = "identity", fill = ifelse(sigtab$log2FoldChange > 0, "#6699CC", "#CC6666")) +  
+    theme_minimal() +  
+    labs(x = "Log2 Fold Change", y = "Species") +  
+    theme(axis.text.y = element_text(size = 8))  
+
+  # 保存条形图  
+  ggsave(file.path(histogram_path, paste0(kingdom_prefix, "_barplot.png")), plot = p, width = 7, height = 5)  
+  
+  return(sigtab)  
+}
+# 主程序  
+# 定义界的前缀  
+kingdoms <- c("B_", "A_", "F_", "V_")  # Bacteria, Archaea, Fungi, Virus  
+
+# 存储所有结果  
+all_results <- list()  
+
+# 对每个界进行差异分析和火山图绘制  
+for (kingdom in kingdoms) {  
+  print(paste("Processing", kingdom, "kingdom"))  
+  
+  # 差异分析和火山图  
+  volcano_results <- diff_analysis_and_volcano(otu_g, met, kingdom, kingdom)  
+  
+  # 条形图统计  
+  barplot_results <- perform_diff_analysis(otu_g, met, kingdom)  
+  
+  # 存储结果  
+  all_results[[kingdom]] <- list(volcano = volcano_results, barplot = barplot_results)  
+}
+```
+
+##gephi
+```{r pressure, echo=FALSE}
+library(tidyverse) 
+library(dplyr)  
+library(tidyr)  
+# 确保列名与 META 数据框中的行名对应  
+colnames(g) <- rownames(META)  
+# 获取 Cluster 列的信息  
+clusters <- META$Cluster  
+# 拆分为两个数据框 g_c1 和 g_c2  
+g_c1 <- g[, clusters == "1"]  # 特定 Cluster 的样本，假设 Cluster "1"  
+g_c2 <- g[, clusters == "2"]  # 特定 Cluster 的样本，假设 Cluster "2"
+# 确保用于导出文件的目录存在  
+output_directory <- "/Users/qiaotong2023/Desktop/fastspar"  
+dir.create(output_directory, showWarnings = FALSE)  
+
+# 将列名改为 #OTU ID  
+colnames(g_c1)[1] <- "#OTU ID"  
+colnames(g_c2)[1] <- "#OTU ID"  
+
+# 导出 g_c1 到 TSV 文件  
+write.table(g_c1, file = file.path(output_directory, "g_c1.tsv"),   
+            sep = "\t",   
+            row.names = TRUE,   
+            col.names = TRUE,   
+            quote = FALSE,   
+            fileEncoding = "UTF-8")  
+
+# 导出 g_c2 到 TSV 文件  
+write.table(g_c2, file = file.path(output_directory, "g_c2.tsv"),   
+            sep = "\t",   
+            row.names = TRUE,   
+            col.names = TRUE,   
+            quote = FALSE,   
+            fileEncoding = "UTF-8") 
+#-------
+##命令行工具fastspar
+#-------
+
+#g的点文件
+#筛选1 p
+p_c1 <- read.csv("/Users/qiaotong2023/Desktop/fastspar/p1/p_c1.csv", header = TRUE, row.names = 1) 
+p_c2 <- read.csv("/Users/qiaotong2023/Desktop/fastspar/p2/p_c2.csv", header = TRUE, row.names = 1)  
+
+library(dplyr)  
+
+##g的边文件
+# 读取相关性数据  
+edges_C1_g <- read.csv("/Users/qiaotong2023/Desktop/fastspar/correlation_c1.csv",
+                              header = TRUE, row.names = 1, check.names = FALSE)  
+edges_C2_g <- read.csv("/Users/qiaotong2023/Desktop/fastspar/correlation_c2.csv",
+                              header = TRUE, row.names = 1, check.names = FALSE) 
+
+# 检查矩阵类型并转换为 data.frame（如果还没转换）  
+edges_C1_g <- as.data.frame(edges_C1_g)  
+edges_C2_g <- as.data.frame(edges_C2_g)  
+p_c1 <- as.data.frame(p_c1)  
+p_c2 <- as.data.frame(p_c2)  
+
+# 将矩阵转换为长格式并增加 Type 列  
+long_C1_g <- edges_C1_g %>%  
+  rownames_to_column(var = "Source") %>%  
+  pivot_longer(-Source, names_to = "Target", values_to = "Weight") %>%  
+  mutate(Type = "Undirect")  
+
+long_C2_g <- edges_C2_g %>%  
+  rownames_to_column(var = "Source") %>%  
+  pivot_longer(-Source, names_to = "Target", values_to = "Weight") %>%  
+  mutate(Type = "Undirect")  
+
+# 将 p 值矩阵转换为长格式  
+long_p_c1 <- p_c1 %>%  
+  rownames_to_column(var = "Source") %>%  
+  pivot_longer(-Source, names_to = "Target", values_to = "p_value")  
+
+long_p_c2 <- p_c2 %>%  
+  rownames_to_column(var = "Source") %>%  
+  pivot_longer(-Source, names_to = "Target", values_to = "p_value")  
+
+library(dplyr)  
+
+# 创建 combined_C1 数据框，添加新条件进行筛选  
+combined_C1 <- long_C1_g %>%  
+  left_join(long_p_c1, by = c("Source", "Target")) %>%  
+  filter(p_value < 0.01) %>%  # p_value 的阈值  
+  filter(if_else(grepl("^B_", Source) & grepl("^B_", Target),  # 如果 Source 和 Target 的前缀都是 B  
+                 (Weight > 0.8 | Weight < -0.75),             # 权重的条件  
+                 abs(Weight) >= 0.28) |                       # 否则，权重绝对值 >= 0.3  
+         ((Source == "B_Bacteroides" | Target == "B_Bacteroides") &   
+          ((Weight > 0.5) | (Weight < -0.45))) |                # 新增条件：任一为 B_Bacteroides  
+         ((Source == "F_Malassezia" | Target == "F_Malassezia") &   
+          ((Weight > 0.28) | (Weight < -0.28))))                  # 新增特例条件：任一为 F_Malassezia  
+
+# 创建 combined_C2 数据框，添加新条件进行筛选  
+combined_C2 <- long_C2_g %>%  
+  left_join(long_p_c2, by = c("Source", "Target")) %>%  
+  filter(p_value < 0.01) %>%  
+  filter(if_else(grepl("^B_", Source) & grepl("^B_", Target),  # 如果 Source 和 Target 的前缀都是 B  
+                 (Weight > 0.8 | Weight < -0.75),             # 权重的条件  
+                 abs(Weight) >= 0.28) |                       # 否则，权重绝对值 >= 0.3  
+         ((Source == "B_Bacteroides" | Target == "B_Bacteroides") &   
+          ((Weight > 0.5) | (Weight < -0.45))) |                # 新增条件：任一为 B_Bacteroides  
+         ((Source == "F_Malassezia" | Target == "F_Malassezia") &   
+          ((Weight > 0.28) | (Weight < -0.28))))                  # 新增特例条件：任一为 F_Malassezia  
+normalize_edges <- function(df) {  
+  df %>%  
+    mutate(  
+      edge_min = pmin(Source, Target),  
+      edge_max = pmax(Source, Target)  
+    ) %>%  
+    distinct(edge_min, edge_max, .keep_all = TRUE) %>%  
+    select(-edge_min, -edge_max)  
+}  
+set.seed(123)  # 固定随机种子，保证结果可复现  
+
+random_flip_edges <- function(df, flip_ratio = 0.6) {  
+  n <- nrow(df)  
+  n_flip <- floor(n * flip_ratio)  
+  
+  flip_indices <- sample(n, n_flip)  
+  
+  df[flip_indices, c("Source", "Target")] <- df[flip_indices, c("Target", "Source")]  
+  
+  return(df)  
+}  
+
+# 对 combined_C1 随机交换60%边的 Source 和 Target  
+combined_C1 <- combined_C1 %>% random_flip_edges(flip_ratio = 0.6)  
+
+# 对 combined_C2 随机交换60%边的 Source 和 Target  
+combined_C2 <- combined_C2 %>% random_flip_edges(flip_ratio = 0.6)  
+
+# 去除反向重复边  
+combined_C1 <- normalize_edges(combined_C1)  
+combined_C2 <- normalize_edges(combined_C2)   
+output_dir <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result4/gephi"  
+
+# 输出结果为 CSV 文件  
+write.csv(combined_C1, file = file.path(output_dir, "edge_c1.csv"), row.names = FALSE)  
+write.csv(combined_C2, file = file.path(output_dir, "edge_c2.csv"), row.names = FALSE)  
+
+# 假设 combined_C1 和 combined_C2 已经存在且包含 Source 列  
+# 从 combined_C1 的 Source 和 Target 两列合并提取唯一 OTU 名称  
+unique_otu_names_C1 <- unique(c(combined_C1$Source, combined_C1$Target))  
+
+# 从 combined_C2 的 Source 和 Target 两列合并提取唯一 OTU 名称  
+unique_otu_names_C2 <- unique(c(combined_C2$Source, combined_C2$Target))  
+
+# 定义一个函数来修改命名规则并提取界名  
+modify_names <- function(otu_name) {  
+  # 分割命名  
+  parts <- unlist(strsplit(otu_name, "_"))  # 使用下划线分割  
+  
+  # 提取界水平分类简称  
+  kingdom_initial <- parts[1]  # 前缀即为界名  
+  genus <- paste(parts[1], parts[2], sep = "_")  # 保留前缀的物种名  
+
+  return(c(genus, kingdom_initial))  # 返回物种名和界名  
+}  
+
+# 创建一个函数处理 unique_otu_names 的提取和转换  
+create_nodes_dataframe <- function(unique_otu_names) {  
+  modified_names <- unique_otu_names %>%  
+    sapply(modify_names) %>%  # 应用修改命名的函数  
+    t()                        # 转置为行格式  
+
+  colnames(modified_names) <- c("ID", "Kingdom")  # 设置列名为 ID 和 Kingdom  
+  nodes_data <- as.data.frame(modified_names, stringsAsFactors = FALSE)  # 创建数据框  
+  
+  # 设置 Label 列为 ID 列的复制  
+  nodes_data$Label <- nodes_data$ID  
+  
+  return(distinct(nodes_data))  # 去除重复值并返回数据框  
+}  
+
+# 处理 combined_C1  
+nodes_C1_g <- create_nodes_dataframe(unique_otu_names_C1)  
+
+# 处理 combined_C2  
+nodes_C2_g <- create_nodes_dataframe(unique_otu_names_C2)  
+
+# 定义输出目录  
+output_dir <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result4/gephi/"  
+
+# 保存为 CSV 文件  
+write.csv(nodes_C1_g, file.path(output_dir, "nodes_C1_g.csv"),  
+          row.names = FALSE, quote = TRUE)  
+
+write.csv(nodes_C2_g, file.path(output_dir, "nodes_C2_g.csv"),  
+          row.names = FALSE, quote = TRUE)  
+##核心属的相关关系
+# 定义一个函数，提取与B_Bacteroides相关的行，并重构数据框  
+extract_b_bacteroides <- function(df) {  
+  # 筛选“Source”或“Target”为B_Bacteroides的行  
+  sub_df <- df[df$Source == "B_Bacteroides" | df$Target == "B_Bacteroides", ]  
+  
+  # 根据“Source”和“Target”得到另一个微生物名（不是B_Bacteroides）  
+  other_microbe <- ifelse(sub_df$Source == "B_Bacteroides", sub_df$Target, sub_df$Source)  
+  
+  # 构造新数据框  
+  new_df <- data.frame(  
+    B_Bacteroides = other_microbe,  
+    Weight = sub_df$Weight,  
+    Type = "Undirected",  
+    stringsAsFactors = FALSE  
+  )  
+  
+  return(new_df)  
+}  
+
+# 分别对两个数据框提取  
+B_Bacteroides_C1 <- extract_b_bacteroides(combined_C1)  
+B_Bacteroides_C2 <- extract_b_bacteroides(combined_C2)  
+
+save_path <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result4/gephi"  
+
+# 写出 CSV 文件  
+write.csv(B_Bacteroides_C1, file = file.path(save_path, "C1_B_Bacteroides.csv"), row.names = FALSE)  
+write.csv(B_Bacteroides_C1, file = file.path(save_path, "C2_B_Bacteroides.csv"), row.names = FALSE)  
+
+extract_microbe <- function(df, microbe_name) {  
+  # 筛选“Source”或“Target”为指定微生物的行  
+  sub_df <- df[df$Source == microbe_name | df$Target == microbe_name, ]  
+  
+  # 根据“Source”和“Target”得到另一个微生物名（不是指定微生物）  
+  other_microbe <- ifelse(sub_df$Source == microbe_name, sub_df$Target, sub_df$Source)  
+  
+  # 构造新数据框  
+  new_df <- data.frame(  
+    Microbe = other_microbe,  
+    Weight = sub_df$Weight,  
+    Type = "Undirected",  
+    stringsAsFactors = FALSE  
+  )  
+  
+  return(new_df)  
+}  
+
+# 使用时传入F_Komagataella  
+F_Komagataella_C1 <- extract_microbe(combined_C1, "F_Komagataella")  
+F_Komagataella_C2 <- extract_microbe(combined_C2, "F_Komagataella")  
+
+write.csv(F_Komagataella_C1, file = file.path(save_path, "C1_F_Komagataella.csv"), row.names = FALSE)  
+write.csv(F_Komagataella_C2, file = file.path(save_path, "C2_F_Komagataella.csv"), row.names = FALSE)  
+
+```
+
+
+
+
+
+##network
+```{r pressure, echo=FALSE}
+library(openxlsx)  
+# 创建 network_C1 数据框，添加新条件进行筛选  
+network_C1 <- long_C1_g %>%  
+  left_join(long_p_c1, by = c("Source", "Target")) %>%  
+  filter(p_value < 0.05) %>%  # p_value 的阈值  
+  filter(if_else(grepl("^B_", Source) & grepl("^B_", Target),  # 如果 Source 和 Target 的前缀都是 B  
+                 (Weight > 0.0 | Weight < -0.0),             # 权重的条件  
+                 abs(Weight) >= 0.0) |                       # 否则，权重绝对值 >= 0.3  
+         ((Source == "B_Bacteroides" | Target == "B_Bacteroides") &   
+          ((Weight > 0.0) | (Weight < -0.0))) |                # 新增条件：任一为 B_Bacteroides  
+         ((Source == "F_Malassezia" | Target == "F_Malassezia") &   
+          ((Weight > 0.0) | (Weight < -0.0))))                  # 新增特例条件：任一为 F_Malassezia  
+
+# 创建 network_C2 数据框，添加新条件进行筛选  
+network_C2 <- long_C2_g %>%  
+  left_join(long_p_c2, by = c("Source", "Target")) %>%  
+  filter(p_value < 0.05) %>%  
+  filter(if_else(grepl("^B_", Source) & grepl("^B_", Target),  # 如果 Source 和 Target 的前缀都是 B  
+                 (Weight > 0.0 | Weight < -0.0),             # 权重的条件  
+                 abs(Weight) >= 0.0) |                       # 否则，权重绝对值 >= 0.3  
+         ((Source == "B_Bacteroides" | Target == "B_Bacteroides") &   
+          ((Weight > 0.0) | (Weight < -0.0))) |                # 新增条件：任一为 B_Bacteroides  
+         ((Source == "F_Malassezia" | Target == "F_Malassezia") &   
+          ((Weight > 0.1) | (Weight < -0.1))))                  # 新增特例条件：任一为 F_Malassezia  
+
+# 定义一个统计前缀组合数量、Weight分步统计的函数  
+count_prefix_combinations <- function(df, output_path, name_prefix) {  
+  get_prefix <- function(x) sapply(strsplit(as.character(x), "_"), `[`, 1)  
+  
+  source_prefix <- get_prefix(df$Source)  
+  target_prefix <- get_prefix(df$Target)  
+  
+  prefix_comb <- ifelse(source_prefix < target_prefix,  
+                        paste(source_prefix, target_prefix, sep = "-"),  
+                        paste(target_prefix, source_prefix, sep = "-"))  
+  
+  # 前缀组合数量统计  
+  prefix_counts <- as.data.frame(table(prefix_comb))  
+  print(prefix_counts)  
+  
+  # Weight分段统计  
+  df$prefix_comb <- prefix_comb  
+  breaks <- seq(-1, 1, by = 0.1)  
+  df$weight_bin <- cut(df$Weight, breaks = breaks, include.lowest = TRUE, right = FALSE)  
+  
+  weight_distribution <- df %>%  
+    group_by(prefix_comb, weight_bin) %>%  
+    summarise(count = n(), .groups = "drop")  
+  
+  print(weight_distribution)  
+  
+  # 写入同一个xlsx文件不同工作表  
+  wb <- createWorkbook()  
+  addWorksheet(wb, "prefix_counts")  
+  addWorksheet(wb, "weight_distribution")  
+  
+  writeData(wb, sheet = "prefix_counts", prefix_counts)  
+  writeData(wb, sheet = "weight_distribution", weight_distribution)  
+  
+  saveWorkbook(wb, file = file.path(output_path, paste0(name_prefix, ".xlsx")), overwrite = TRUE)  
+  
+  # 删除临时变量  
+  rm(source_prefix, target_prefix, prefix_comb, prefix_counts, breaks)  
+  rm(df, weight_distribution, wb)  
+}  
+
+output_dir <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result4/gephi"  
+
+cat("network_C1 stats and distributions:\n")  
+count_prefix_combinations(network_C1, output_dir, "network_C1")  
+
+cat("\nnetwork_C2 stats and distributions:\n")  
+count_prefix_combinations(network_C2, output_dir, "network_C2")  
+
+
+plot_top10_species <- function(df, count_ylim) {  
+  counts <- table(c(df$Source, df$Target)) %>%  
+    as.data.frame() %>%  
+    rename(Species = Var1, Count = Freq) %>%  
+    arrange(desc(Count)) %>%  
+    slice_head(n = 10)  
+  
+  ggplot(counts, aes(x = reorder(Species, Count), y = Count)) +  
+    geom_col(fill = "steelblue") +  
+    coord_flip() +  
+    scale_y_continuous(expand = c(0, 0.05), limits = c(0, count_ylim)) +  # 限制y轴上限  
+    labs(title = NULL, x = NULL, y = NULL) +  
+    theme_minimal(base_size = 14) +  
+    theme(  
+      panel.grid = element_blank(),  
+      panel.border = element_rect(color = "black", fill = NA, size = 1),  
+      axis.ticks = element_line(color = "black"),  
+      axis.text = element_text(color = "black")  
+    )  
+}  
+
+# 调用时传入不同上限  
+p1 <- plot_top10_species(combined_C1, count_ylim = 140)  
+p2 <- plot_top10_species(combined_C2, count_ylim = 300)  
+
+print(p1)  
+print(p2)  
+# 路径  
+output_dir <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result4/gephi/network_Frequency"  
+
+# 保存p1  
+ggsave(filename = file.path(output_dir, "net10_C1.pdf"),  
+       plot = p1,  
+       device = "pdf",  
+       width = 8, height = 6)  
+
+# 保存p2  
+ggsave(filename = file.path(output_dir, "net10_C2.pdf"),  
+       plot = p2,  
+       device = "pdf",  
+       width = 8, height = 6)  
+```
+
+##network Frequency
+```{r pressure, echo=FALSE}
+library(ggplot2)  
+library(dplyr)  
+library(stringr)  
+library(scales)  
+library(readxl)  
+
+plot_and_save <- function(data, save_dir, filename_suffix) {  
+  if (!dir.exists(save_dir)) dir.create(save_dir, recursive = TRUE)  
+  unique_prefixes <- unique(data$prefix_comb)  
+  for (pfx in unique_prefixes) {  
+    subdata <- data %>% filter(prefix_comb == pfx) %>%  
+      mutate(  
+        bin_lower = as.numeric(str_extract(weight_bin, "(?<=\\[|\\().+?(?=,)")),  
+        bin_upper = as.numeric(str_extract(weight_bin, "(?<=,).+?(?=\\)|\\])")),  
+        bin_mid = (bin_lower + bin_upper) / 2  
+      )  
+    max_count <- max(subdata$count)  
+    ymax <- max_count * 1.1  
+    p <- ggplot(subdata, aes(x = bin_mid, y = count)) +  
+      geom_col(width = 0.09, fill = "skyblue", color = "black") +  
+      geom_line(color = "red", size = 1.2) +  
+      geom_point(color = "red", size = 2) +  
+      scale_x_continuous(  
+        breaks = seq(-1, 1, by = 0.2),  
+        limits = c(-1, 1),  
+        expand = c(0, 0)  
+      ) +  
+      scale_y_continuous(  
+        labels = label_comma(),  
+        expand = c(0, 0),  
+        limits = c(0, ymax)  
+      ) +  
+      labs(  
+        y = "Microbiota pairs Count",  
+        x = "",  
+        title = paste0("Count Distribution for ", pfx)  
+      ) +  
+      theme_minimal(base_size = 15) +  
+      theme(  
+        panel.grid = element_blank(),  
+        axis.line = element_line(color = "black"),  
+        axis.text.x = element_text(angle = 45, hjust = 1)  
+      )  
+    filename <- file.path(save_dir, paste0(pfx, filename_suffix, ".pdf"))  
+    ggsave(filename = filename, plot = p, device = "pdf", width = 10, height = 6, units = "in")  
+    message("Saved plot for ", pfx, " to ", filename)  
+  }  
+}  
+
+# 定义文件路径和对应后缀  
+files <- list(  
+  list(path = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result4/gephi/net_Fenquency_C1.xlsx", suffix = "_C1"),  
+  list(path = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result4/gephi/net_Frequency_C2.xlsx", suffix = "_C2")  
+)  
+
+save_path <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result4/gephi/network_Frequency/"  
+
+for (f in files) {  
+  df <- read_excel(f$path, sheet = "weight_distribution")  
+  plot_and_save(df, save_path, f$suffix)  
+}  
+```
+
+
+
+
+##go
+```{r pressure, echo=FALSE}
+go <- read.csv("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rawdata/PPM.csv", header = TRUE, row.names = 1) 
+feature <- read.csv("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rawdata/feature.csv", header = TRUE, row.names = 1)  
+# 假设go和META数据已经加载并处理  
+# 找出GO和META数据的公共样本  
+common_samples <- intersect(colnames(go), rownames(META))  
+go <- t(go[, common_samples, drop = FALSE])  
+
+# 筛选公共样本的META数据  
+META_go <- META[common_samples, ]  
+go <- cbind(Cluster = META_go$Cluster, go)
+go <- as.data.frame(go)
+# 加载必要的包  
+library(dplyr)  
+library(tidyr)  
+library(tibble)
+# 对于每个 GOID 进行 Wilcoxon 检验并存储 p 值  
+results <- go %>%  
+  select(Cluster, 2:3116) %>%  # 选择 Cluster 列和 GOID 列  
+  pivot_longer(cols = -Cluster, names_to = "GOID", values_to = "count") %>% # 转换为长格式  
+  group_by(GOID) %>%  
+  summarise(p_value = wilcox.test(count[Cluster == 1], count[Cluster == 2], exact = FALSE)$p.value) %>%  
+  ungroup()  
+
+# BH 矫正  
+results <- results %>%  
+  mutate(padj = p.adjust(p_value, method = "BH"))  
+
+# 筛选 padj < 0.05 的 GOID  
+filtered_results <- results %>%  
+  filter(padj < 0.05) %>%  
+  select(GOID)  
+
+# 获取需要保留的 GOID 列  
+significant_goids <- filtered_results$GOID  
+
+# 筛选原始数据框，保留符合条件的列  
+  go<- go %>%  
+  select(c("Cluster", all_of(significant_goids)))  
+
+goids_to_keep <- colnames(go)[2:1062]  
+
+# 根据GOID过滤注释数据框feature  
+# 将feature的行名提取为GOID（假设它们是行名）  
+feature_goids <- rownames(feature)  
+
+# 只保留在goids_to_keep中存在的GOID  
+feature <- feature[feature_goids %in% goids_to_keep, ] 
+
+feature_goids <- rownames(feature)  
+
+# 从 results 数据框筛选出 GOID 和对应的 padj  
+filtered <- results %>%  
+  filter(GOID %in% feature_goids)  # 只保留在 feature 行名中的 GOID  
+
+#将 padj 添加到 feature 数据框中  
+# 创建一个新的列来保存 padj  
+feature <- feature %>%  
+  rownames_to_column("GOID") %>%  # 将行名转换为列，方便合并  
+  left_join(filtered %>% select(GOID, padj), by = "GOID")  # 合并 padj 列  
+
+# 加载所需的库  
+library(dplyr)  
+library(tidyr)  
+
+# 将go数据框从长格式转换为便于操作的长格式  
+go_long <- go %>%  
+  pivot_longer(-Cluster, names_to = "GOID", values_to = "count")  
+
+# 汇总每个GOID在不同Cluster中的总count  
+go_summary <- go_long %>%  
+  group_by(GOID, Cluster) %>%  
+  summarise(total_count = sum(count), .groups = 'drop') %>%  
+  pivot_wider(names_from = Cluster, values_from = total_count, values_fill = list(total_count = 0))  
+
+# 重命名列为count1和count2  
+colnames(go_summary) <- c("GOID", "count1", "count2")  
+
+
+feature <- feature %>%  
+  left_join(go_summary %>% select(GOID, count1, count2), by = "GOID")  
+
+#统计 Ontology 列的值及其频数  
+ontology <- feature %>%  
+  group_by(Ontology) %>%            # 根据 Ontology 列分组  
+  summarise(value = n()) %>%        # 计算频数  
+  ungroup()                          # 解除分组  
+
+# 手动分配颜色  
+color_palette <- c("BP" = "#990026", "CC" = "#1e4e8a", "MF" = "#FCBB44")  
+
+# 设置柱子的宽度  
+bar_width <- 0.5  # 根据需要调整宽度  
+
+# 绘制柱状图  
+p <- ggplot(ontology, aes(x = Ontology, y = value, fill = Ontology)) +  
+  geom_bar(stat = "identity", width = bar_width) +  # 设置柱子的宽度  
+  labs(x = "Ontology",   
+       y = "Value") +  # 删除标题  
+  theme_minimal() +  # 使用简约主题  
+  scale_fill_manual(values = color_palette) +  # 指定颜色  
+  theme(panel.grid.major = element_blank(),  # 删除主要网格线  
+        panel.grid.minor = element_blank(),  # 删除次要网格线  
+        axis.line = element_line(color = "black"))  # 添加坐标轴线  
+
+# 保存图像到指定路径  
+output_path_png <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result4/zhu.png"  
+output_path_pdf <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result4/zhu.pdf"  
+
+# 保存为PNG格式  
+ggsave(output_path_png, plot = p, width = 8, height = 6, dpi = 300)  
+
+# 保存为PDF格式  
+ggsave(output_path_pdf, plot = p, width = 8, height = 6)  
+
+##
+# 按照筛选条件进行数据筛选  
+top_terms <- feature %>%  
+  filter(  
+    (Ontology %in% c("BP", "MF") & count1 > 50000 & count2 > 50000 & padj < 0.05) |  
+      (Ontology == "CC" & count1 > 20000 & count2 > 20000 & padj < 0.05)  
+  ) %>%  
+  group_by(Ontology) %>%  
+  arrange(padj) %>%  
+  slice_head(n = 10) %>%  # 选择每个分组的前 10 条  
+  ungroup() %>%   
+  select(Description_ez, count1, count2, padj, Ontology)  
+
+# 数据转换为长格式  
+long_data <- top_terms %>%  
+  pivot_longer(cols = c(count1, count2), names_to = "Cluster", values_to = "Count")  
+
+# 为每个 Ontology 绘制横向柱状图  
+unique_ontologies <- unique(long_data$Ontology)  
+
+for (ontology in unique_ontologies) {  
+  # 筛选当前 Ontology 的数据  
+  current_data <- long_data %>% filter(Ontology == ontology)  
+
+  # 设置分行显示，每30个字符换行  
+  current_data <- current_data %>%  
+    mutate(Description_ez = str_replace_all(Description_ez, "(.{1,30})(\\s|$)", "\\1\n"))  # 每30个字符换行  
+
+  # 绘制横向柱状图  
+  plot <- ggplot(current_data, aes(x = reorder(Description_ez, Count), y = Count, fill = Cluster)) +  
+    geom_bar(stat = "identity", position = position_dodge(), show.legend = TRUE) +  
+    coord_flip() +  # 横向显示  
+    labs(x = "", y = "") +  # 删除坐标轴标题  
+    scale_y_continuous(labels = comma) +  # 使用真实值格式化 y 轴标签  
+    scale_fill_manual(values = c("count1" = "#990026", "count2" = "#1e4e8a"),   
+                      labels = c("count1" = "C1", "count2" = "C2")) +  # 指定颜色和图例名称  
+    theme_minimal() +  
+    theme(  
+      axis.text.x = element_text(angle = 0, hjust = 0.5, size = 8),  # 调整 x 轴文本为横向  
+      axis.text.y = element_text(size = 8),  # 调整 y 轴文本大小  
+      plot.title = element_blank(),  # 删除图表标题  
+      panel.grid.major = element_blank(),  # 删除主要网格线  
+      panel.grid.minor = element_blank(),  # 删除次要网格线  
+      panel.border = element_rect(color = "black", fill = NA, size = 1),  # 添加黑色框线  
+      legend.position = c(0.9, 0.1),  # 设置图例位置为右下角  
+      legend.title = element_blank()  # 隐藏图例标题  
+    )  
+
+
+# 构建文件名  
+file_name_png <- paste0("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result4/go_", tolower(ontology), ".png")  
+file_name_pdf <- paste0("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result4/go_", tolower(ontology), ".pdf")  
+
+# 保存为 PNG  
+ggsave(file_name_png, plot = plot, width = 8, height = 6)  # 保存图形为 PNG  
+
+# 保存为 PDF  
+ggsave(file_name_pdf, plot = plot, width = 8, height = 6)  # 保存图形为 PDF  
+}  
+
+
+
+
+```
+
+
+##RF
+```{r pressure, echo=FALSE}
+# 加载包  
+library(tidyverse)  
+library(caret)  
+library(randomForest)  
+library(e1071)  
+library(gbm)  
+library(nnet)  
+library(keras)  
+library(readxl)    
+library(pROC) 
+library(dplyr)  
+library(caret)  
+library(readxl)  
+
+library(dplyr)  
+library(caret)  
+library(readxl)  
+# 定义一个函数，用于分析给定的工作表  
+analyze_model <- function(sheet_name) {  
+  # 从Excel文件中读取结果  
+  de_results <- read_excel("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/enhance volcnao/g/DESeq2_results1.xlsx",   
+                            sheet = sheet_name)  
+
+  # 获取分析中涉及的物种列表  
+  species_list <- de_results$species  
+
+  # 提取物种丰度数据  
+  abundance_data <- g[species_list, ]  
+  abundance_data <- as.data.frame(t(abundance_data))  
+  rownames(abundance_data) <- colnames(g[species_list, ])  
+
+  # 提取META数据框中的协变量列  
+  meta_covariates <- META %>%  
+    select(Therapy, Antibiotics, Cluster)  
+
+  # 合并丰度数据与协变量  
+  combined_data <- merge(abundance_data, meta_covariates, by = "row.names", all.x = TRUE)  
+  combined_data <- combined_data %>% select(-Row.names)  
+
+  # 替换空字符串为 "no"  
+  combined_data <- combined_data %>%  
+    mutate(Antibiotics = ifelse(Antibiotics == "", "no", Antibiotics))   
+
+  # 确保 Cluster 列是因子类型  
+  combined_data <- combined_data %>%  
+    mutate(Cluster = as.factor(Cluster))  
+
+  # 转换丰度数据列为数值型  
+  combined_data <- combined_data %>%  
+    mutate(across(starts_with(c("B_", "F_", "A_", "V")), as.numeric))  
+
+  # 设置随机种子  
+  set.seed(123)  
+
+  # 创建训练集和测试集  
+  train_index <- createDataPartition(combined_data$Cluster, p = 0.7, list = FALSE)  
+  train_data <- combined_data[train_index, ]  
+  test_data <- combined_data[-train_index, ]  
+
+  # 提取自变量和因变量  
+  train_X <- train_data %>% select(where(is.numeric))  
+  train_y <- as.factor(train_data$Cluster)  
+
+  # 训练随机森林模型  
+  rf_model <- train(x = train_X, y = train_y, method = "rf",   
+                    trControl = trainControl(method = "cv", number = 10))  
+
+  # 在测试集上获取预测的概率  
+  test_X <- test_data %>% select(where(is.numeric))  
+  predictions_proba <- predict(rf_model, newdata = test_X, type = "prob")  
+
+  # 计算ROC  
+  roc_result_rf <- roc(test_data$Cluster, predictions_proba[, 2])  
+
+  # 计算AUC值  
+  auc_value <- auc(roc_result_rf)  
+  cat(paste(sheet_name, "的 AUC:", auc_value, "\n"))  # 打印AUC值  
+
+  # 如果是"diff1"模型，则打印特征重要性  
+  if (sheet_name == "diff1") {  
+    importance_scores <- varImp(rf_model)$importance  
+    cat("特征重要性得分：\n")  
+    print(importance_scores)  
+  }  
+
+  # 创建包含ROC数据的数据框  
+  roc_data <- data.frame(  
+    specificity = roc_result_rf$specificities,  
+    sensitivity = roc_result_rf$sensitivities,  
+    model = switch(sheet_name,  
+                   "diff1" = "Combine",  
+                   "modelA" = "Arc",  
+                   "modelB" = "Bac",  
+                   "modelF" = "Fun",  
+                   "modelV" = "Vir")  
+  )  
+  
+  return(roc_data)  
+}  
+
+# 用于存储所有模型的ROC数据的数据框列表  
+roc_data_combined <- data.frame()  
+
+# 分析不同工作表并生成各自的数据框  
+model_sheets <- c("diff1", "modelA", "modelB", "modelF", "modelV")  
+for (sheet in model_sheets) {  
+  roc_data_combined <- rbind(roc_data_combined, analyze_model(sheet))  
+}  
+
+# 将model列转为因子并设置顺序  
+roc_data_combined$model <- factor(roc_data_combined$model,   
+                                   levels = c("Combine", "Bac", "Arc", "Fun", "Vir"))  
+
+# 绘制 ROC 曲线 并保存为png和pdf格式  
+ggplot_obj <- ggplot(roc_data_combined, aes(x = 1 - specificity, y = sensitivity, color = model)) +  
+  geom_line() +  # 简单绘制各模型的曲线  
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +  
+  labs(x = "1 - Specificity (False Positive Rate)", y = "Sensitivity (True Positive Rate)") +  
+  theme_minimal() +  
+  theme(panel.grid.major = element_line(color = "lightgray"),   
+        panel.grid.minor = element_line(color = "lightgray"),   
+        panel.border = element_rect(color = "black", fill = NA),  
+        axis.line = element_line(color = "black")) +   
+  scale_color_manual(values = c("Combine" = "red", "Bac" = "green", "Arc" = "blue", "Fun" = "purple", "Vir" = "orange")) +  
+  theme(legend.title = element_blank())  
+
+# 保存图形为PNG和PDF格式  
+ggsave(filename = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result3/roc_rf.png",   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+
+ggsave(filename = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result3/roc_rf.pdf",   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+```
+
+##xgboost
+```{r pressure, echo=FALSE}
+# 加载所需的库  
+library(xgboost)  
+library(readxl)  
+library(dplyr)  
+library(caret)  
+library(ggplot2)  
+library(pROC)  
+
+# 假设 combined_data 已经被定义过  
+ # 设置随机种子以确保结果可重复  
+set.seed(123)  
+
+# 指定模型工作表名称  
+model_sheets <- c("diff1", "modelA", "modelB", "modelF", "modelV")  
+
+# 定义用于分析每个模型的函数  
+analyze_model_xgboost <- function(sheet_name) {  
+    # 从Excel文件中读取结果  
+    de_results <- read_excel("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/enhance volcnao/g/DESeq2_results.xlsx",   
+                              sheet = sheet_name)  
+
+    # 获取分析中涉及的物种列表  
+    species_list <- de_results$species  
+
+    # 提取物种丰度数据  
+    abundance_data <- g[species_list, ]  
+    abundance_data <- as.data.frame(t(abundance_data))  
+    rownames(abundance_data) <- colnames(g[species_list, ])  
+
+    # 提取META数据框中的协变量列  
+    meta_covariates <- META %>% select(Therapy, Antibiotics, Cluster)  
+
+    # 合并丰度数据与协变量  
+    combined_data <- merge(abundance_data, meta_covariates, by = "row.names", all.x = TRUE)  
+    combined_data <- combined_data %>% select(-Row.names)  
+
+    # 替换空字符串为 "no"  
+    combined_data <- combined_data %>% mutate(Antibiotics = ifelse(Antibiotics == "", "no", Antibiotics))   
+    combined_data <- combined_data %>% mutate(Cluster = as.factor(Cluster))  
+
+    # 创建训练集和测试集  
+    train_index <- createDataPartition(combined_data$Cluster, p = 0.7, list = FALSE)  
+    train_data <- combined_data[train_index, ]  
+    test_data <- combined_data[-train_index, ]  
+
+    # 提取自变量（丰度数据）和因变量（Cluster）  
+    train_X <- train_data %>% select(where(is.numeric))  
+    train_y <- as.factor(train_data$Cluster)  
+
+    num_classes <- length(unique(train_y))  # 计算类别数  
+    train_y_numeric <- as.integer(train_y) - 1  # 从1开始转为0开始  
+
+    # 创建 DMatrix 对象用于 XGBoost  
+    dtrain <- xgb.DMatrix(data = as.matrix(train_X), label = train_y_numeric)  
+    # 在测试集上创建 DMatrix  
+    test_X <- test_data %>% select(where(is.numeric))  
+    dtest <- xgb.DMatrix(data = as.matrix(test_X))  
+
+    # 设置 XGBoost 模型参数  
+    xgb_param <- list(  
+        objective = "multi:softprob",  
+        num_class = num_classes,  
+        eval_metric = "mlogloss"  
+    )  
+
+    # 训练 XGBoost 模型  
+    xgb_model <- xgb.train(params = xgb_param, data = dtrain, nrounds = 100)  
+
+    # 获取测试集预测的概率  
+    predictions_prob_xgboost <- predict(xgb_model, newdata = dtest)  
+    predictions_matrix_xgboost <- matrix(predictions_prob_xgboost, ncol = num_classes, byrow = TRUE)  
+    colnames(predictions_matrix_xgboost) <- levels(train_y)  
+    prob_class_1_xgboost <- predictions_matrix_xgboost[, 2]  # 假设第二列是类别 1 的概率  
+    predicted_classes_xgboost <- max.col(predictions_matrix_xgboost) - 1  
+
+    # 转换为因子  
+    predicted_classes_xgboost <- factor(predicted_classes_xgboost, levels = 0:(num_classes - 1), labels = levels(train_y))  
+
+    # 打印训练和测试的结果  
+    cat(paste("\n===== 模型", sheet_name, "结果 =====\n"))  
+    cat("训练集类别分布:\n")  
+    print(table(train_y))  
+
+    cat("\n===== 测试集结果 =====\n")  
+    print(head(test_data))  
+    cat("测试集类别分布:\n")  
+    print(table(test_data$Cluster))  
+
+    # 计算混淆矩阵  
+    confusion_matrix_xgboost <- confusionMatrix(predicted_classes_xgboost, test_data$Cluster)  
+
+    # 输出混淆矩阵及指标  
+    cat("混淆矩阵:\n")  
+    print(confusion_matrix_xgboost)  
+
+    cat("模型准确率:", confusion_matrix_xgboost$overall['Accuracy'], "\n")  
+    cat("Kappa:", confusion_matrix_xgboost$overall['Kappa'], "\n")  
+    cat("每个类的精确度和召回率:\n")  
+    print(confusion_matrix_xgboost$byClass)  
+
+    # 计算并打印AUC值  
+    roc_result_xgboost <- roc(test_data$Cluster, prob_class_1_xgboost, levels = levels(train_y))  
+    auc_value <- auc(roc_result_xgboost)  
+    cat("AUC值:", auc_value, "\n")  # 打印AUC值  
+
+    # 返回 ROC 数据  
+    roc_data_xgboost <- data.frame(  
+        specificity = 1 - roc_result_xgboost$specificities,  
+        sensitivity = roc_result_xgboost$sensitivities,  
+        model = switch(sheet_name,  
+                       "diff1" = "Combine",  
+                       "modelA" = "Arc",  
+                       "modelB" = "Bac",  
+                       "modelF" = "Fun",  
+                       "modelV" = "Vir")  
+    )  
+    return(roc_data_xgboost)  
+}  
+
+# 用于存储所有模型的ROC数据的数据框列表  
+roc_data_combined <- data.frame()  
+
+# 分析不同工作表并生成各自的数据框  
+for (sheet in model_sheets) {  
+    roc_data_combined <- rbind(roc_data_combined, analyze_model_xgboost(sheet))  
+}  
+
+# 将model列转为因子并设置顺序  
+roc_data_combined$model <- factor(roc_data_combined$model,   
+                                   levels = c("Combine", "Bac", "Arc", "Fun", "Vir"))  
+
+# 绘制 ROC 曲线 并保存为png和pdf格式  
+ggplot_obj <- ggplot(roc_data_combined, aes(x = specificity, y = sensitivity, color = model)) +  
+    geom_line() +  # 简单绘制各模型的曲线  
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +  
+    labs(x = "1 - Specificity (False Positive Rate)", y = "Sensitivity (True Positive Rate)") +  
+    theme_minimal() +  
+    theme(panel.grid.major = element_line(color = "lightgray"),   
+          panel.grid.minor = element_line(color = "lightgray"),   
+          panel.border = element_rect(color = "black", fill = NA),  
+          axis.line = element_line(color = "black")) +   
+    scale_color_manual(values = c("Combine" = "red", "Bac" = "green", "Arc" = "blue", "Fun" = "purple", "Vir" = "orange")) +  
+    theme(legend.title = element_blank())  
+
+# 保存图形为PNG和PDF格式  
+ggsave(filename = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result3/roc_xgboost.png",   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+
+ggsave(filename = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result3/roc_xgboost.pdf",   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")   
+```
+
+##svm
+```{r pressure, echo=FALSE}
+library(e1071)        # 支持向量机的包  
+library(caret)        # 用于混淆矩阵及其他功能  
+library(ggplot2)      # 画图包  
+library(pROC)         # 用于 ROC 曲线  
+library(dplyr)        # 数据操作包  
+library(readxl)      # 读取 Excel 文件的包  
+
+# 设置随机种子以确保结果可重复  
+set.seed(123)  
+
+# 指定模型工作表名称  
+model_sheets <- c("diff1", "modelA", "modelB", "modelF", "modelV")  
+
+# 定义用于分析每个模型的函数  
+analyze_model_svm <- function(sheet_name) {  
+    # 从Excel文件中读取结果  
+    de_results <- read_excel("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/enhance volcnao/g/DESeq2_results1.xlsx",   
+                              sheet = sheet_name)  
+
+    # 获取分析中涉及的物种列表  
+    species_list <- de_results$species  
+
+    # 提取物种丰度数据  
+    abundance_data <- g[species_list, ]  
+    abundance_data <- as.data.frame(t(abundance_data))  
+    rownames(abundance_data) <- colnames(g[species_list, ])  
+
+    # 提取META数据框中的协变量列  
+    meta_covariates <- META %>% select(Therapy, Antibiotics, Cluster)  
+
+    # 合并丰度数据与协变量  
+    combined_data <- merge(abundance_data, meta_covariates, by = "row.names", all.x = TRUE)  
+    combined_data <- combined_data %>% select(-Row.names)  
+
+    # 替换空字符串为 "no"  
+    combined_data <- combined_data %>% mutate(Antibiotics = ifelse(Antibiotics == "", "no", Antibiotics))   
+    combined_data <- combined_data %>% mutate(Cluster = as.factor(Cluster))  
+
+    # 创建训练集和测试集  
+    train_index <- createDataPartition(combined_data$Cluster, p = 0.7, list = FALSE)  
+    train_data <- combined_data[train_index, ]  
+    test_data <- combined_data[-train_index, ]  
+
+    # 提取自变量（丰度数据）和因变量（Cluster）  
+    train_X <- train_data %>% select(where(is.numeric))  
+    train_y <- as.factor(train_data$Cluster)  
+
+    # 确保测试集的因子水平与训练集一致  
+    test_data$Cluster <- factor(test_data$Cluster, levels = levels(train_y))  
+
+    # 训练支持向量机模型  
+    svm_model <- svm(train_X, train_y, kernel = "radial", probability = TRUE)  
+
+    # 在测试集上进行预测  
+    predictions_prob_svm <- predict(svm_model, test_data %>% select(where(is.numeric)), probability = TRUE)  
+    predictions_svm <- as.vector(predictions_prob_svm)  
+
+    # 确保预测结果的因子水平与训练集一致  
+    predictions_svm <- factor(predictions_svm, levels = levels(train_y))  
+
+    # 计算混淆矩阵  
+    confusion_matrix_svm <- confusionMatrix(predictions_svm, test_data$Cluster)  
+
+    # 输出混淆矩阵及指标  
+    cat("混淆矩阵:\n")  
+    print(confusion_matrix_svm)  
+
+    cat("模型准确率:", confusion_matrix_svm$overall['Accuracy'], "\n")  
+    cat("Kappa:", confusion_matrix_svm$overall['Kappa'], "\n")  
+    cat("每个类的精确度和召回率:\n")  
+    print(confusion_matrix_svm$byClass)  
+
+    # 计算并打印AUC值  
+    # 获取测试集预测的概率（假设每个类的概率都将输出）  
+    predictions_prob <- attr(predictions_prob_svm, "probabilities")  
+    
+    prob_class_1_svm <- predictions_prob[, 2]  # 假设第二列是类别 1 的概率  
+    roc_result_svm <- roc(test_data$Cluster, prob_class_1_svm, levels = levels(train_y))  
+    auc_value <- auc(roc_result_svm)  
+    cat("AUC值:", auc_value, "\n")  # 打印AUC值  
+
+    # 返回 ROC 数据  
+    roc_data_svm <- data.frame(  
+        specificity = 1 - roc_result_svm$specificities,  
+        sensitivity = roc_result_svm$sensitivities,  
+        model = switch(sheet_name,  
+                       "diff1" = "Combine",  
+                       "modelA" = "Arc",  
+                       "modelB" = "Bac",  
+                       "modelF" = "Fun",  
+                       "modelV" = "Vir")  
+    )  
+    return(roc_data_svm)  
+}  
+
+# 用于存储所有模型的ROC数据的数据框列表  
+roc_data_combined <- data.frame()  
+
+# 分析不同工作表并生成各自的数据框  
+for (sheet in model_sheets) {  
+    roc_data_combined <- rbind(roc_data_combined, analyze_model_svm(sheet))  
+}  
+
+# 将model列转为因子并设置顺序  
+roc_data_combined$model <- factor(roc_data_combined$model,   
+                                   levels = c("Combine", "Bac", "Arc", "Fun", "Vir"))  
+
+# 绘制 ROC 曲线 并保存为 png 和 pdf 格式  
+ggplot_obj <- ggplot(roc_data_combined, aes(x = specificity, y = sensitivity, color = model)) +  
+    geom_line() +  # 简单绘制各模型的曲线  
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +  
+    labs(x = "1 - Specificity (False Positive Rate)", y = "Sensitivity (True Positive Rate)") +  
+    theme_minimal() +  
+    theme(panel.grid.major = element_line(color = "lightgray"),   
+          panel.grid.minor = element_line(color = "lightgray"),   
+          panel.border = element_rect(color = "black", fill = NA),  
+          axis.line = element_line(color = "black")) +   
+    scale_color_manual(values = c("Combine" = "red", "Bac" = "green", "Arc" = "blue", "Fun" = "purple", "Vir" = "orange")) +  
+    theme(legend.title = element_blank())  
+
+# 保存图形为PNG和PDF格式  
+ggsave(filename = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result3/roc_svm.png",   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+
+ggsave(filename = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result3/roc_svm.pdf",   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+```
+
+##GBM
+```{r pressure, echo=FALSE}
+library(gbm)          # 导入 GBM 包  
+library(caret)        # 用于混淆矩阵及其他功能  
+library(pROC)         # 用于 ROC 曲线  
+library(dplyr)        # 数据操作包  
+library(ggplot2)      # 画图包  
+library(readxl)       # 读取 Excel 文件的包  
+
+# 设置随机种子以确保结果可重复  
+set.seed(123)  
+
+# 指定模型工作表名称  
+model_sheets <- c("diff1", "modelA", "modelB", "modelF", "modelV")  
+
+# 定义用于分析每个模型的函数  
+analyze_model_gbm <- function(sheet_name) {  
+    # 从Excel文件中读取结果  
+    de_results <- read_excel("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/enhance volcnao/g/DESeq2_results1.xlsx",   
+                              sheet = sheet_name)  
+
+    # 获取分析中涉及的物种列表  
+    species_list <- de_results$species  
+
+    # 提取物种丰度数据  
+    abundance_data <- g[species_list, ]  
+    abundance_data <- as.data.frame(t(abundance_data))  
+    rownames(abundance_data) <- colnames(g[species_list, ])  
+
+    # 提取META数据框中的协变量列  
+    meta_covariates <- META %>% select(Therapy, Antibiotics, Cluster)  
+
+    # 合并丰度数据与协变量  
+    combined_data <- merge(abundance_data, meta_covariates, by = "row.names", all.x = TRUE)  
+    combined_data <- combined_data %>% select(-Row.names)  
+
+    # 替换空字符串为 "no"  
+    combined_data <- combined_data %>% mutate(Antibiotics = ifelse(Antibiotics == "", "no", Antibiotics))   
+
+    # 转换 Cluster 列的值为 0 和 1，并确保是数值型  
+    combined_data <- combined_data %>%   
+        mutate(Cluster = ifelse(Cluster == 2, 1, 0),  # 转换 Cluster 列的值  
+               Cluster = as.numeric(Cluster))  # 确保 Cluster 列是数值型  
+
+    # 创建 GBM 专属的副本数据框    
+    gbm_data <- combined_data %>%  
+      mutate(Therapy = as.factor(Therapy),      # 确保 Therapy 列是因子  
+             Antibiotics = as.factor(Antibiotics),  # 确保 Antibiotics 列是因子  
+             across(where(is.numeric), ~ ifelse(is.na(.), 0, .)))  # 替换缺失值为 0  
+
+    # 创建训练集和测试集  
+    train_index <- createDataPartition(gbm_data$Cluster, p = 0.7, list = FALSE)  
+    train_data <- gbm_data[train_index, ]  
+    test_data <- gbm_data[-train_index, ]  
+
+    # 确保训练集中有足够的类来进行 GBM 训练  
+    if (length(unique(train_data$Cluster)) < 2) {  
+      stop("训练集中的 Cluster 类别不足以进行训练。")  
+    }  
+
+    # 训练 GBM 模型  
+    gbm_model <- gbm(  
+      formula = Cluster ~ .,                      # 包括所有的自变量  
+      distribution = "bernoulli",                 # 二分类问题  
+      data = train_data,                          # 训练数据  
+      n.trees = 100,                              # 树的数量  
+      interaction.depth = 3,                      # 最大深度  
+      n.minobsinnode = 10,                        # 最小节点数  
+      shrinkage = 0.01,                           # 学习率  
+      verbose = FALSE                             # 静默模式  
+    )  
+
+    # 在测试集上获取预测的概率  
+    predictions_prob_gbm <- predict(gbm_model, newdata = test_data, n.trees = 100, type = "response")  
+
+    # 将预测结果转换为类别  
+    predicted_classes_gbm <- ifelse(predictions_prob_gbm > 0.5, 1, 0)  # 根据概率转换为 0 或 1  
+    predicted_classes_gbm <- factor(predicted_classes_gbm, levels = c(0, 1))  # 转换为因子类型  
+
+    # 计算混淆矩阵  
+    confusion_matrix_gbm <- confusionMatrix(predicted_classes_gbm, factor(test_data$Cluster))  
+
+    # 输出混淆矩阵及指标  
+    cat("混淆矩阵:\n")  
+    print(confusion_matrix_gbm)  
+    cat("模型准确率:", confusion_matrix_gbm$overall['Accuracy'], "\n")  
+    cat("Kappa:", confusion_matrix_gbm$overall['Kappa'], "\n")  
+    cat("每个类的精确度和召回率:\n")  
+    print(confusion_matrix_gbm$byClass)  
+
+    # 计算并打印AUC值  
+    roc_result_gbm <- roc(test_data$Cluster, predictions_prob_gbm)  
+    auc_value_gbm <- auc(roc_result_gbm)  
+    cat("AUC值:", auc_value_gbm, "\n")  # 打印AUC值  
+
+    # 返回 ROC 数据  
+    roc_data_gbm <- data.frame(  
+        specificity = 1 - roc_result_gbm$specificities,  
+        sensitivity = roc_result_gbm$sensitivities,  
+        model = switch(sheet_name,  
+                       "diff1" = "Combine",  
+                       "modelA" = "Arc",  
+                       "modelB" = "Bac",  
+                       "modelF" = "Fun",  
+                       "modelV" = "Vir")  
+    )  
+    return(roc_data_gbm)  
+}  
+
+# 用于存储所有模型的ROC数据的数据框列表  
+roc_data_combined <- data.frame()  
+
+# 分析不同工作表并生成各自的数据框  
+for (sheet in model_sheets) {  
+    roc_data_combined <- rbind(roc_data_combined, analyze_model_gbm(sheet))  
+}  
+
+# 确保 roc_data_combined 中的 model 列是因子，并设置顺序  
+roc_data_combined$model <- factor(roc_data_combined$model,  
+                                   levels = c("Combine", "Bac", "Arc", "Fun", "Vir"))  
+
+# 绘制 ROC 曲线 并保存为 PNG 和 PDF 格式  
+ggplot_obj <- ggplot(roc_data_combined, aes(x = specificity, y = sensitivity, color = model)) +  
+    geom_line() +  # 简单绘制各模型的曲线  
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +  
+    labs(x = "1 - Specificity (False Positive Rate)", y = "Sensitivity (True Positive Rate)") +  
+    theme_minimal() +  
+    theme(panel.grid.major = element_line(color = "lightgray"),   
+          panel.grid.minor = element_line(color = "lightgray"),   
+          panel.border = element_rect(color = "black", fill = NA),  
+          axis.line = element_line(color = "black")) +   
+    scale_color_manual(values = c("Combine" = "red", "Bac" = "green", "Arc" = "blue", "Fun" = "purple", "Vir" = "orange")) +  
+    theme(legend.title = element_blank())  
+
+# 保存图形为 PNG 和 PDF 格式  
+ggsave(filename = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result3/roc_gbm.png",   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+
+ggsave(filename = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result3/roc_gbm.pdf",   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+
+```
