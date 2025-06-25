@@ -1,0 +1,1187 @@
+---
+title: "Result4"
+author: "qiao"
+date: "2025-06-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##different analysis
+```{r pressure, echo=FALSE}
+#一.加载包设置路径
+# 加载必要的包  
+library(DESeq2)  
+library(ggplot2)  
+library(openxlsx)  
+library(EnhancedVolcano)  
+
+# 设置保存路径  
+volcano_path <- "/Users/qiaotong2023/Desktop/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/结果1 分子分型-临床特征相关性/结果1 icb分型/Figure3/volcano_g"  
+histogram_path <- "/Users/qiaotong2023/Desktop/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/结果1 分子分型-临床特征相关性/结果1 icb分型/Figure3/histogram_g"  
+
+#分界、绘图、输出报告很长，先写函数再统一执行
+# 二. 差异分析和火山图绘制函数  
+diff_analysis_and_volcano <- function(otu_g, met, kingdom_prefix, filename_prefix) {  
+  # 选择以指定前缀开头的物种  
+  taxa_names <- rownames(otu_g)  
+  kingdom_taxa <- taxa_names[startsWith(taxa_names, kingdom_prefix)]  
+  
+  if (length(kingdom_taxa) == 0) {  
+    message(paste("No taxa found for", kingdom_prefix))  
+    return(NULL)  
+  }  
+  
+  # 过滤出对应界的OTU数据  
+  otu_subset <- otu_g[kingdom_taxa, , drop = FALSE]  
+  
+  # 确保样本名与分组信息匹配  
+  sample_ids <- colnames(otu_subset)  
+  response <- met$Cluster[match(sample_ids, met$SampleID)]  # 使用Cluster列进行分组  
+  
+  # 创建DESeq2数据集  
+  dds <- DESeqDataSetFromMatrix(countData = otu_subset,  
+                                colData = data.frame(Cluster = factor(response)),  # 确保Cluster为因子  
+                                design = ~ Cluster)  
+  # 进行差异分析  
+  dds <- DESeq(dds)  
+  res <- results(dds, cooksCutoff = FALSE)  
+  
+  # 过滤显著性结果  
+  alpha <- 0.05  
+  sigtab <- res[which(res$padj < alpha), ]  
+  if (nrow(sigtab) == 0) {  
+    message(paste("No significant taxa found for", kingdom_prefix))  
+    return(NULL)  
+  }  
+  
+  sigtab <- cbind(as.data.frame(sigtab), species = rownames(sigtab))  
+
+  # 绘制火山图  
+  png(file.path(volcano_path, paste0(filename_prefix, "_volcano_plot.png")), width = 7, height = 5, units = "in", res = 300)  
+  volcano_plot <- EnhancedVolcano(sigtab,  
+                                  lab = sigtab$species,  
+                                  x = "log2FoldChange",  
+                                  y = "padj",  
+                                  xlim = c(-4, 4),  
+                                  title = paste("Differential Analysis -", filename_prefix),  
+                                  pCutoff = alpha,  
+                                  FCcutoff = 1,  
+                                  labSize = 2)  
+  print(volcano_plot)  
+  dev.off()  
+  
+  return(sigtab)  
+}
+
+# 差异分析函数  
+perform_diff_analysis <- function(otu_g, met, kingdom_prefix) {  
+  # 选择以指定前缀开头的物种  
+  taxa_names <- rownames(otu_g)  
+  kingdom_taxa <- taxa_names[startsWith(taxa_names, kingdom_prefix)]  
+  
+  if (length(kingdom_taxa) == 0) {  
+    warning(paste("No taxa found for", kingdom_prefix))  
+    return(NULL)  
+  }  
+  
+  # 过滤出对应界的OTU数据  
+  otu_subset <- otu_g[kingdom_taxa, , drop = FALSE]  
+  
+  # 确保样本名与分组信息匹配  
+  sample_ids <- colnames(otu_subset)  
+  response <- met$Response[match(sample_ids, met$SampleID)]  
+  
+  # 创建DESeq2数据集  
+  dds <- DESeqDataSetFromMatrix(countData = otu_subset,  
+                                colData = data.frame(Response = response),  
+                                design = ~ Response)  
+
+  # 进行差异分析  
+  dds <- DESeq(dds)  
+  res <- results(dds, cooksCutoff = FALSE)  
+
+  # 将结果转换为数据框  
+  res_df <- as.data.frame(res)  
+  res_df$species <- rownames(res_df)  
+
+  # 分别获取上调和下调的物种  
+  up_regulated <- res_df[res_df$log2FoldChange > 0, ]  
+  down_regulated <- res_df[res_df$log2FoldChange < 0, ]  
+
+  # 分别按padj值排序  
+  up_regulated <- up_regulated[order(up_regulated$padj), ]  
+  down_regulated <- down_regulated[order(down_regulated$padj), ]  
+
+  # 各取前25个  
+  up_regulated <- head(up_regulated, 25)  
+  down_regulated <- head(down_regulated, 25)  
+
+  # 合并结果  
+  sigtab <- rbind(up_regulated, down_regulated)  
+  rownames(sigtab) <- sigtab$species  
+  sigtab$species <- NULL  
+
+  if(nrow(sigtab) == 0) {  
+    warning("No significant differences found.")  
+    return(NULL)  
+  }  
+
+  # 绘制条形图  
+  p <- ggplot(sigtab, aes(x = log2FoldChange, y = reorder(rownames(sigtab), log2FoldChange))) +  
+    geom_bar(stat = "identity", fill = ifelse(sigtab$log2FoldChange > 0, "#6699CC", "#CC6666")) +  
+    theme_minimal() +  
+    labs(x = "Log2 Fold Change", y = "Species") +  
+    theme(axis.text.y = element_text(size = 8))  
+
+  # 保存条形图  
+  ggsave(file.path(histogram_path, paste0(kingdom_prefix, "_barplot.png")), plot = p, width = 7, height = 5)  
+  
+  return(sigtab)  
+}
+# 主程序  
+# 定义界的前缀  
+kingdoms <- c("B_", "A_", "F_", "V_")  # Bacteria, Archaea, Fungi, Virus  
+
+# 存储所有结果  
+all_results <- list()  
+
+# 对每个界进行差异分析和火山图绘制  
+for (kingdom in kingdoms) {  
+  print(paste("Processing", kingdom, "kingdom"))  
+  
+  # 差异分析和火山图  
+  volcano_results <- diff_analysis_and_volcano(otu_g, met, kingdom, kingdom)  
+  
+  # 条形图统计  
+  barplot_results <- perform_diff_analysis(otu_g, met, kingdom)  
+  
+  # 存储结果  
+  all_results[[kingdom]] <- list(volcano = volcano_results, barplot = barplot_results)  
+}
+```
+
+##RF
+```{r pressure, echo=FALSE}
+# 加载包  
+library(tidyverse)  
+library(caret)  
+library(randomForest)  
+library(e1071)  
+library(gbm)  
+library(nnet)  
+library(keras)  
+library(readxl)    
+library(pROC) 
+library(dplyr)  
+library(caret)  
+library(readxl)  
+
+library(dplyr)  
+library(caret)  
+library(readxl) 
+
+# 定义一个函数，用于分析给定的工作表  
+analyze_model <- function(sheet_name) {  
+  # 从Excel文件中读取结果  
+  de_results <- read_excel("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/enhance volcnao/g/DESeq2_results1.xlsx",   
+                            sheet = sheet_name)  
+
+  # 获取分析中涉及的物种列表  
+  species_list <- de_results$species  
+
+  # 提取物种丰度数据  
+  abundance_data <- g[species_list, ]  
+  abundance_data <- as.data.frame(t(abundance_data))  
+  rownames(abundance_data) <- colnames(g[species_list, ])  
+
+  # 提取META数据框中的协变量列  
+  meta_covariates <- META %>%  
+    select(Therapy, Antibiotics, Cluster)  
+
+  # 合并丰度数据与协变量  
+  combined_data <- merge(abundance_data, meta_covariates, by = "row.names", all.x = TRUE)  
+  combined_data <- combined_data %>% select(-Row.names)  
+
+  # 替换空字符串为 "no"  
+  combined_data <- combined_data %>%  
+    mutate(Antibiotics = ifelse(Antibiotics == "", "no", Antibiotics))   
+
+  # 确保 Cluster 列是因子类型  
+  combined_data <- combined_data %>%  
+    mutate(Cluster = as.factor(Cluster))  
+
+  # 转换丰度数据列为数值型  
+  combined_data <- combined_data %>%  
+    mutate(across(starts_with(c("B_", "F_", "A_", "V")), as.numeric))  
+
+  # 设置随机种子  
+  set.seed(123)  
+
+  # 创建训练集和测试集  
+  train_index <- createDataPartition(combined_data$Cluster, p = 0.7, list = FALSE)  
+  train_data <- combined_data[train_index, ]  
+  test_data <- combined_data[-train_index, ]  
+
+  # 提取自变量和因变量  
+  train_X <- train_data %>% select(where(is.numeric))  
+  train_y <- as.factor(train_data$Cluster)  
+
+  # 训练随机森林模型  
+  rf_model <- train(x = train_X, y = train_y, method = "rf",   
+                    trControl = trainControl(method = "cv", number = 10))  
+
+  # 在测试集上获取预测的概率  
+  test_X <- test_data %>% select(where(is.numeric))  
+  predictions_proba <- predict(rf_model, newdata = test_X, type = "prob")  
+
+  # 计算ROC  
+  roc_result_rf <- roc(test_data$Cluster, predictions_proba[, 2])  
+
+  # 计算AUC值  
+  auc_value <- auc(roc_result_rf)  
+  cat(paste(sheet_name, "的 AUC:", auc_value, "\n"))  # 打印AUC值  
+
+  # 如果是"diff1"模型，则打印特征重要性  
+  if (sheet_name == "diff1") {  
+    importance_scores <- varImp(rf_model)$importance  
+    cat("特征重要性得分：\n")  
+    print(importance_scores)  
+  }  
+
+  # 创建包含ROC数据的数据框  
+  roc_data <- data.frame(  
+    specificity = roc_result_rf$specificities,  
+    sensitivity = roc_result_rf$sensitivities,  
+    model = switch(sheet_name,  
+                   "diff1" = "Combine",  
+                   "modelA" = "Arc",  
+                   "modelB" = "Bac",  
+                   "modelF" = "Fun",  
+                   "modelV" = "Vir")  
+  )  
+  
+  return(roc_data)  
+}  
+
+# 用于存储所有模型的ROC数据的数据框列表  
+roc_data_combined <- data.frame()  
+
+# 分析不同工作表并生成各自的数据框  
+model_sheets <- c("diff1", "modelA", "modelB", "modelF", "modelV")  
+for (sheet in model_sheets) {  
+  roc_data_combined <- rbind(roc_data_combined, analyze_model(sheet))  
+}  
+
+# 将model列转为因子并设置顺序  
+roc_data_combined$model <- factor(roc_data_combined$model,   
+                                   levels = c("Combine", "Bac", "Arc", "Fun", "Vir"))  
+
+# 绘制 ROC 曲线 并保存为png和pdf格式  
+ggplot_obj <- ggplot(roc_data_combined, aes(x = 1 - specificity, y = sensitivity, color = model)) +  
+  geom_line() +  # 简单绘制各模型的曲线  
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +  
+  labs(x = "1 - Specificity (False Positive Rate)", y = "Sensitivity (True Positive Rate)") +  
+  theme_minimal() +  
+  theme(panel.grid.major = element_line(color = "lightgray"),   
+        panel.grid.minor = element_line(color = "lightgray"),   
+        panel.border = element_rect(color = "black", fill = NA),  
+        axis.line = element_line(color = "black")) +   
+  scale_color_manual(values = c("Combine" = "red", "Bac" = "green", "Arc" = "blue", "Fun" = "purple", "Vir" = "orange")) +  
+  theme(legend.title = element_blank())  
+
+# 保存图形为PNG和PDF格式  
+ggsave(filename = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result3/roc_rf.png",   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+
+ggsave(filename = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result3/roc_rf.pdf",   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+```
+
+
+##RF check
+```{r pressure, echo=FALSE}
+# 加载必要的库
+library(randomForest)
+library(DESeq2)
+library(EnhancedVolcano)
+library(openxlsx)
+library(ggplot2)
+
+# 设置保存结果的目录
+output_dir <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/maunscript/6.17一修/check_fig/different"
+
+# 拆分 g 数据框
+g_a <- g[grepl("^A_", rownames(g)), ]
+g_b <- g[grepl("^B_", rownames(g)), ]
+g_f <- g[grepl("^F_", rownames(g)), ]
+g_v <- g[grepl("^V_", rownames(g)), ]
+g_v <- g_v[-c(1, (nrow(g_v)-3):nrow(g_v)), ] + 1
+
+# 随机划分训练集和测试集
+set.seed(42)  # 设置随机种子以确保可重复性
+
+# 定义函数来划分训练集和测试集
+split_data <- function(meta, train_fraction = 0.7) {
+  # 按 Cluster 分组，分别抽取 70% 的样本
+  train_indices <- integer(0)
+  for (cluster in unique(meta$Cluster)) {
+    cluster_indices <- which(meta$Cluster == cluster)
+    train_indices <- c(train_indices, sample(cluster_indices, length(cluster_indices) * train_fraction))
+  }
+  train_indices <- unique(train_indices)
+  
+  return(train_indices)
+}
+
+# 使用统一的元数据 META 进行抽样
+train_indices <- split_data(META, train_fraction = 0.7)
+
+# 提取训练集和测试集
+
+train_data_a <- g_a[, train_indices]
+test_data_a <- g_a[, -train_indices]
+train_meta <- META[train_indices, ]
+test_meta <- META[-train_indices, ]
+
+train_data_b <- g_b[, train_indices]
+test_data_b <- g_b[, -train_indices]
+
+train_data_f <- g_f[, train_indices]
+test_data_f <- g_f[, -train_indices]
+
+train_data_v <- g_v[, train_indices]
+test_data_v <- g_v[, -train_indices]
+
+# 定义一个函数来进行差异分析和火山图绘制
+analyze_and_plot <- function(train_data, train_meta, kingdom_name) {
+  # 检查Cluster列是否为因子变量
+  if (!is.factor(train_meta$Cluster)) {
+    train_meta$Cluster <- as.factor(train_meta$Cluster)
+    message("Cluster column converted to factor.")
+  }
+  
+  # 检查Cluster列的levels
+  cluster_levels <- levels(train_meta$Cluster)
+  print(paste0("Cluster levels: ", paste(cluster_levels, collapse = ", ")))
+  
+  # 创建 DESeq2 对象
+  train_data_matrix <- as.matrix(train_data) # 确保数据是矩阵格式
+  dds <- DESeqDataSetFromMatrix(countData = train_data_matrix,
+                                colData = train_meta,
+                                design = ~ Cluster)
+  
+  # 计算几何平均值
+  geoMeans <- apply(counts(dds), 1, function(x) exp(mean(log(x[x > 0]))))
+  dds <- estimateSizeFactors(dds, geoMeans = geoMeans)
+  
+  # 差异表达分析
+  dds <- DESeq(dds, test="Wald", fitType="parametric")
+  
+  # 提取显著性结果
+  res <- results(dds, contrast=c("Cluster", "1", "2"), cooksCutoff = FALSE)
+  alpha <- 0.05  # 调整为 p 值阈值
+  sigtab <- res[which(res$padj < alpha), ]
+  
+  # 将显著性结果与物种名称合并
+  sigtab <- cbind(as(sigtab, "data.frame"), species = rownames(sigtab))
+  
+  # 准备火山图数据
+  theme_set(theme_bw())
+  scale_fill_discrete <- function(palname = "Set1", ...) {
+    scale_fill_brewer(palette = palname, ...)
+  }
+  
+  x <- tapply(sigtab$baseMean, sigtab$species, function(x) max(x))
+  x <- rev(sort(x, TRUE))
+  sigtab$species <- factor(as.character(sigtab$species), levels=names(x))
+  
+  # 设置火山图参数
+  xlim <- c(-4, 4)
+  FCcutoff <- 1
+  
+  # 针对 A, F, V 修改火山图参数
+  if (kingdom_name %in% c("A")) {
+    xlim <- c(-2, 2)
+    y_limits <- c(0, 30)
+    FCcutoff <- 0.25
+  }
+  if (kingdom_name %in% c("B")) {
+    y_limits <- c(0, 220)
+    FCcutoff <- 1
+  }
+  if (kingdom_name %in% c("F")) {
+    xlim <- c(-1.5, 1.5)
+    y_limits <- c(0, 35)
+    FCcutoff <- 0.25
+  }
+  if (kingdom_name %in% c("V")) {
+    xlim <- c(-1.5, 1.5)
+    y_limits <- c(0, 10)
+    FCcutoff <- 0.25
+  }
+  
+  # 绘制火山图
+  volcano_plot <- EnhancedVolcano(sigtab,
+                                  lab = sigtab$species,
+                                  x = 'log2FoldChange',
+                                  y = 'padj',
+                                  xlim = xlim,
+                                  ylim = y_limits,
+                                  title = paste('C1 versus C2 for', kingdom_name),  # 修改标题
+                                  pCutoff = 0.05,
+                                  FCcutoff = FCcutoff,
+                                  labSize = 2,
+                                  colAlpha = 1 - sigtab$padj) # 设置颜色饱和度与p.adj成反比
+  
+  # 保存火山图为 PNG 和 PDF 格式
+  png_filename <- file.path(output_dir, paste0(kingdom_name, "_volcano_plot.png"))
+  pdf_filename <- file.path(output_dir, paste0(kingdom_name, "_volcano_plot.pdf"))
+  
+  png(filename = png_filename, width = 7, height = 5, units = "in", res = 600) # 提高分辨率
+  print(volcano_plot)
+  dev.off()
+  
+  pdf(file = pdf_filename, width = 7, height = 5)
+  print(volcano_plot)
+  dev.off()
+  
+  # 返回显著性结果
+  return(sigtab)
+}
+
+# 对每个界进行分析和绘图，并保存显著性结果
+sigtab_a <- analyze_and_plot(train_data_a, train_meta_a, "A")
+sigtab_b <- analyze_and_plot(train_data_b, train_meta_b, "B")
+sigtab_f <- analyze_and_plot(train_data_f, train_meta_f, "F")
+sigtab_v <- analyze_and_plot(train_data_v, train_meta_v, "V")
+
+# 创建一个 workbook 用于保存 DESeq2 结果
+wb <- createWorkbook()
+
+# 将显著性结果保存到 Excel 工作表
+addWorksheet(wb, "A")
+writeData(wb, sheet = "A", sigtab_a)
+addWorksheet(wb, "B")
+writeData(wb, sheet = "B", sigtab_b)
+addWorksheet(wb, "F")
+writeData(wb, sheet = "F", sigtab_f)
+addWorksheet(wb, "V")
+writeData(wb, sheet = "V", sigtab_v)
+
+# 保存 Excel 文件
+excel_filename <- file.path(output_dir, "DESeq2_results.xlsx")
+saveWorkbook(wb, excel_filename, overwrite = TRUE)
+
+
+# 加载必要的库
+library(openxlsx)
+library(randomForest)
+library(pROC)
+library(ggplot2)
+library(caret)
+
+# 导入模型结果
+machine_filename <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/maunscript/6.17一修/check_fig/machine/machine.xlsx"
+model_a <- read.xlsx(machine_filename, sheet = "modelA")
+model_b <- read.xlsx(machine_filename, sheet = "modelB")
+model_f <- read.xlsx(machine_filename, sheet = "modelF")
+model_v <- read.xlsx(machine_filename, sheet = "modelV")
+model_combined <- read.xlsx(machine_filename, sheet = "combined")
+
+# 提取选出的物种
+species_list <- list(
+  model_a = unique(model_a$species),
+  model_b = unique(model_b$species),
+  model_f = unique(model_f$species),
+  model_v = unique(model_v$species),
+  model_combined = unique(model_combined$species)
+)
+
+# 创建一个函数来进行10折交叉验证并计算ROC曲线
+run_cross_validation <- function(data, selected_species, meta_data) {
+  # 仅保留选定物种
+  data_filtered <- data[rownames(data) %in% selected_species, , drop = FALSE]
+  
+  # 准备训练集和标签
+  meta_filtered <- meta_data[rownames(meta_data) %in% colnames(data_filtered), "Cluster", drop = FALSE]
+
+  if (nrow(data_filtered) == 0 || nrow(meta_filtered) == 0) {
+    stop("Filtered data or metadata is empty. Please check the selected species.")
+  }
+  
+  # 确保Cluster是因子
+  meta_filtered$Cluster <- as.factor(meta_filtered$Cluster)
+  
+  # 10折交叉验证
+  folds <- createFolds(meta_filtered$Cluster, k = 10, list = TRUE)
+  roc_data_combined <- list()  # 存储每折的ROC数据
+  
+  for (i in seq_along(folds)) {
+    # 划分训练集和测试集
+    test_indices <- folds[[i]]
+    train_indices <- setdiff(seq_len(nrow(meta_filtered)), test_indices)
+    
+    # 训练模型
+    rf_model <- randomForest(
+      x = t(data_filtered[, train_indices]),  # 转置为行为特征
+      y = meta_filtered$Cluster[train_indices],
+      ntree = 100
+    )
+    
+    # 进行预测
+    predictions <- predict(rf_model, newdata = t(data_filtered[, test_indices]), type = "prob")
+    
+    # 计算ROC曲线数据
+    roc_result <- roc(meta_filtered$Cluster[test_indices], predictions[, 2])  # 假设第二列是正类概率
+    roc_data_combined[[i]] <- data.frame(
+      specificity = roc_result$specificities,
+      sensitivity = roc_result$sensitivities,
+      fold = i  # 添加折数
+    )  # 添加模型标识
+  }
+  
+  return(roc_data_combined)
+}
+
+# 创建一个空的数据框来存储所有模型的ROC数据
+roc_data_combined_all <- data.frame()
+
+# 对每个模型进行10折交叉验证
+for (model_name in names(species_list)) {
+  if (model_name == "model_a") {
+    fold_rocs <- run_cross_validation(train_data_a, species_list$model_a, train_meta)
+  } else if (model_name == "model_b") {
+    fold_rocs <- run_cross_validation(train_data_b, species_list$model_b, train_meta)
+  } else if (model_name == "model_f") {
+    fold_rocs <- run_cross_validation(train_data_f, species_list$model_f, train_meta)
+  } else if (model_name == "model_v") {
+    fold_rocs <- run_cross_validation(train_data_v, species_list$model_v, train_meta)
+  } else if (model_name == "model_combined") {
+    fold_rocs <- run_cross_validation(train_data_combined, species_list$model_combined, train_meta)
+  }
+  
+  # 计算平均ROC
+  all_specificities <- unlist(lapply(fold_rocs, `[[`, "specificity"))
+  all_sensitivities <- unlist(lapply(fold_rocs, `[[`, "sensitivity"))
+  
+  # 创建平均曲线
+  mean_specificity <- unique(sort(all_specificities))
+  mean_sensitivity <- sapply(mean_specificity, function(spec) {
+    mean(all_sensitivities[all_specificities == spec], na.rm = TRUE)
+  })
+
+  # 保存平均ROC
+  roc_data_combined_all <- rbind(roc_data_combined_all, data.frame(
+    specificity = mean_specificity,
+    sensitivity = mean_sensitivity,
+    model = model_name
+  ))
+}
+
+# 绘制 ROC 曲线 并保存为PNG和PDF格式  
+ggplot_obj <- ggplot(roc_data_combined_all, aes(x = 1 - specificity, y = sensitivity, color = model)) +  
+  geom_line(size = 1.2) +  # 绘制各模型的曲线  
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +  
+  labs(x = "1 - Specificity (False Positive Rate)", y = "Sensitivity (True Positive Rate)", 
+       title = "Average ROC Curves for Random Forest Models with 10-Fold Cross-Validation") +  
+  theme_minimal() +  
+  theme(panel.grid.major = element_line(color = "lightgray"),   
+        panel.grid.minor = element_line(color = "lightgray"),   
+        panel.border = element_rect(color = "black", fill = NA),  
+        axis.line = element_line(color = "black")) +   
+  scale_color_manual(values = c("model_a" = "blue", 
+                                 "model_b" = "green", 
+                                 "model_f" = "purple", 
+                                 "model_v" = "orange", 
+                                 "model_combined" = "red")) +  
+  theme(legend.title = element_blank())  
+
+# 保存图形为PNG和PDF格式  
+output_dir <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/maunscript/6.17一修/check_fig/machine"
+
+ggsave(filename = file.path(output_dir, "roc_rf_check.png"),   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+
+ggsave(filename = file.path(output_dir, "roc_rf_check.pdf"),   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+  
+```
+
+
+##xgboost
+```{r pressure, echo=FALSE}
+# 加载所需的库  
+library(xgboost)  
+library(readxl)  
+library(dplyr)  
+library(caret)  
+library(ggplot2)  
+library(pROC)  
+
+# 假设 combined_data 已经被定义过  
+ # 设置随机种子以确保结果可重复  
+set.seed(123)  
+
+# 指定模型工作表名称  
+model_sheets <- c("diff1", "modelA", "modelB", "modelF", "modelV")  
+
+# 定义用于分析每个模型的函数  
+analyze_model_xgboost <- function(sheet_name) {  
+    # 从Excel文件中读取结果  
+    de_results <- read_excel("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/enhance volcnao/g/DESeq2_results.xlsx",   
+                              sheet = sheet_name)  
+
+    # 获取分析中涉及的物种列表  
+    species_list <- de_results$species  
+
+    # 提取物种丰度数据  
+    abundance_data <- g[species_list, ]  
+    abundance_data <- as.data.frame(t(abundance_data))  
+    rownames(abundance_data) <- colnames(g[species_list, ])  
+
+    # 提取META数据框中的协变量列  
+    meta_covariates <- META %>% select(Therapy, Antibiotics, Cluster)  
+
+    # 合并丰度数据与协变量  
+    combined_data <- merge(abundance_data, meta_covariates, by = "row.names", all.x = TRUE)  
+    combined_data <- combined_data %>% select(-Row.names)  
+
+    # 替换空字符串为 "no"  
+    combined_data <- combined_data %>% mutate(Antibiotics = ifelse(Antibiotics == "", "no", Antibiotics))   
+    combined_data <- combined_data %>% mutate(Cluster = as.factor(Cluster))  
+
+    # 创建训练集和测试集  
+    train_index <- createDataPartition(combined_data$Cluster, p = 0.7, list = FALSE)  
+    train_data <- combined_data[train_index, ]  
+    test_data <- combined_data[-train_index, ]  
+
+    # 提取自变量（丰度数据）和因变量（Cluster）  
+    train_X <- train_data %>% select(where(is.numeric))  
+    train_y <- as.factor(train_data$Cluster)  
+
+    num_classes <- length(unique(train_y))  # 计算类别数  
+    train_y_numeric <- as.integer(train_y) - 1  # 从1开始转为0开始  
+
+    # 创建 DMatrix 对象用于 XGBoost  
+    dtrain <- xgb.DMatrix(data = as.matrix(train_X), label = train_y_numeric)  
+    # 在测试集上创建 DMatrix  
+    test_X <- test_data %>% select(where(is.numeric))  
+    dtest <- xgb.DMatrix(data = as.matrix(test_X))  
+
+    # 设置 XGBoost 模型参数  
+    xgb_param <- list(  
+        objective = "multi:softprob",  
+        num_class = num_classes,  
+        eval_metric = "mlogloss"  
+    )  
+
+    # 训练 XGBoost 模型  
+    xgb_model <- xgb.train(params = xgb_param, data = dtrain, nrounds = 100)  
+
+    # 获取测试集预测的概率  
+    predictions_prob_xgboost <- predict(xgb_model, newdata = dtest)  
+    predictions_matrix_xgboost <- matrix(predictions_prob_xgboost, ncol = num_classes, byrow = TRUE)  
+    colnames(predictions_matrix_xgboost) <- levels(train_y)  
+    prob_class_1_xgboost <- predictions_matrix_xgboost[, 2]  # 假设第二列是类别 1 的概率  
+    predicted_classes_xgboost <- max.col(predictions_matrix_xgboost) - 1  
+
+    # 转换为因子  
+    predicted_classes_xgboost <- factor(predicted_classes_xgboost, levels = 0:(num_classes - 1), labels = levels(train_y))  
+
+    # 打印训练和测试的结果  
+    cat(paste("\n===== 模型", sheet_name, "结果 =====\n"))  
+    cat("训练集类别分布:\n")  
+    print(table(train_y))  
+
+    cat("\n===== 测试集结果 =====\n")  
+    print(head(test_data))  
+    cat("测试集类别分布:\n")  
+    print(table(test_data$Cluster))  
+
+    # 计算混淆矩阵  
+    confusion_matrix_xgboost <- confusionMatrix(predicted_classes_xgboost, test_data$Cluster)  
+
+    # 输出混淆矩阵及指标  
+    cat("混淆矩阵:\n")  
+    print(confusion_matrix_xgboost)  
+
+    cat("模型准确率:", confusion_matrix_xgboost$overall['Accuracy'], "\n")  
+    cat("Kappa:", confusion_matrix_xgboost$overall['Kappa'], "\n")  
+    cat("每个类的精确度和召回率:\n")  
+    print(confusion_matrix_xgboost$byClass)  
+
+    # 计算并打印AUC值  
+    roc_result_xgboost <- roc(test_data$Cluster, prob_class_1_xgboost, levels = levels(train_y))  
+    auc_value <- auc(roc_result_xgboost)  
+    cat("AUC值:", auc_value, "\n")  # 打印AUC值  
+
+    # 返回 ROC 数据  
+    roc_data_xgboost <- data.frame(  
+        specificity = 1 - roc_result_xgboost$specificities,  
+        sensitivity = roc_result_xgboost$sensitivities,  
+        model = switch(sheet_name,  
+                       "diff1" = "Combine",  
+                       "modelA" = "Arc",  
+                       "modelB" = "Bac",  
+                       "modelF" = "Fun",  
+                       "modelV" = "Vir")  
+    )  
+    return(roc_data_xgboost)  
+}  
+
+# 用于存储所有模型的ROC数据的数据框列表  
+roc_data_combined <- data.frame()  
+
+# 分析不同工作表并生成各自的数据框  
+for (sheet in model_sheets) {  
+    roc_data_combined <- rbind(roc_data_combined, analyze_model_xgboost(sheet))  
+}  
+
+# 将model列转为因子并设置顺序  
+roc_data_combined$model <- factor(roc_data_combined$model,   
+                                   levels = c("Combine", "Bac", "Arc", "Fun", "Vir"))  
+
+# 绘制 ROC 曲线 并保存为png和pdf格式  
+ggplot_obj <- ggplot(roc_data_combined, aes(x = specificity, y = sensitivity, color = model)) +  
+    geom_line() +  # 简单绘制各模型的曲线  
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +  
+    labs(x = "1 - Specificity (False Positive Rate)", y = "Sensitivity (True Positive Rate)") +  
+    theme_minimal() +  
+    theme(panel.grid.major = element_line(color = "lightgray"),   
+          panel.grid.minor = element_line(color = "lightgray"),   
+          panel.border = element_rect(color = "black", fill = NA),  
+          axis.line = element_line(color = "black")) +   
+    scale_color_manual(values = c("Combine" = "red", "Bac" = "green", "Arc" = "blue", "Fun" = "purple", "Vir" = "orange")) +  
+    theme(legend.title = element_blank())  
+
+# 保存图形为PNG和PDF格式  
+ggsave(filename = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result3/roc_xgboost.png",   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+
+ggsave(filename = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result3/roc_xgboost.pdf",   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")   
+```
+
+##svm check
+```{r pressure, echo=FALSE}
+# 加载必要的库
+library(openxlsx)
+library(e1071)  # e1071包提供了SVM功能
+library(pROC)
+library(ggplot2)
+library(caret)
+
+# 导入模型结果
+machine_filename <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/maunscript/6.17一修/check_fig/machine/machine.xlsx"
+model_a <- read.xlsx(machine_filename, sheet = "modelA")
+model_b <- read.xlsx(machine_filename, sheet = "modelB")
+model_f <- read.xlsx(machine_filename, sheet = "modelF")
+model_v <- read.xlsx(machine_filename, sheet = "modelV")
+model_combined <- read.xlsx(machine_filename, sheet = "combined")
+
+# 提取选出的物种
+species_list <- list(
+  model_a = unique(model_a$species),
+  model_b = unique(model_b$species),
+  model_f = unique(model_f$species),
+  model_v = unique(model_v$species),
+  model_combined = unique(model_combined$species)
+)
+
+# 创建一个函数来进行5折交叉验证并计算ROC曲线
+run_cross_validation <- function(data, selected_species, meta_data) {
+  # 仅保留选定物种
+  data_filtered <- data[rownames(data) %in% selected_species, , drop = FALSE]
+  
+  # 准备训练集和标签
+  meta_filtered <- meta_data[rownames(meta_data) %in% colnames(data_filtered), "Cluster", drop = FALSE]
+
+  if (nrow(data_filtered) == 0 || nrow(meta_filtered) == 0) {
+    stop("Filtered data or metadata is empty. Please check the selected species.")
+  }
+  
+  # 确保Cluster是因子，并转换为有效的名称
+  meta_filtered$Cluster <- as.factor(meta_filtered$Cluster)
+  levels(meta_filtered$Cluster) <- make.names(levels(meta_filtered$Cluster))
+
+  # 5折交叉验证
+  folds <- createFolds(meta_filtered$Cluster, k = 10, list = TRUE)
+  roc_data_combined <- list()  # 存储每折的ROC数据
+  
+  for (i in seq_along(folds)) {
+    # 划分训练集和测试集
+    test_indices <- folds[[i]]
+    train_indices <- setdiff(seq_len(nrow(meta_filtered)), test_indices)
+
+    # 在这里，训练SVM模型 - 不使用tuneGrid
+    svm_model <- train(
+      x = t(data_filtered[, train_indices]),  # 转置为行为特征
+      y = meta_filtered$Cluster[train_indices],
+      method = "svmRadial",  # 使用径向基核SVM
+      preProcess = c("center", "scale"),  # 预处理
+      trControl = trainControl(method = "none", classProbs = TRUE)  # 不进行交叉验证
+    )
+    
+    # 进行预测，获取类概率
+    predictions <- predict(svm_model, newdata = t(data_filtered[, test_indices]), type = "prob")
+    
+    # 确保第二列是正类概率
+    if (is.null(predictions)) {
+      stop("Predictions are NULL. Please check the SVM model and data.")
+    }
+
+    # 计算类型
+    if (ncol(predictions) < 2) {
+      stop("Predictions do not contain enough classes for ROC calculation.")
+    }
+    
+    # 计算ROC曲线数据
+    roc_result <- roc(meta_filtered$Cluster[test_indices], predictions[, 2])  # 假设第二列是正类概率
+    roc_data_combined[[i]] <- data.frame(
+      specificity = roc_result$specificities,
+      sensitivity = roc_result$sensitivities,
+      fold = i  # 添加折数
+    )
+  }
+  
+  return(roc_data_combined)
+}
+
+# 创建一个空的数据框来存储所有模型的ROC数据
+roc_data_combined_all <- data.frame()
+
+# 对每个模型进行5折交叉验证
+for (model_name in names(species_list)) {
+  if (model_name == "model_a") {
+    fold_rocs <- run_cross_validation(train_data_a, species_list$model_a, train_meta)
+  } else if (model_name == "model_b") {
+    fold_rocs <- run_cross_validation(train_data_b, species_list$model_b, train_meta)
+  } else if (model_name == "model_f") {
+    fold_rocs <- run_cross_validation(train_data_f, species_list$model_f, train_meta)
+  } else if (model_name == "model_v") {
+    fold_rocs <- run_cross_validation(train_data_v, species_list$model_v, train_meta)
+  } else if (model_name == "model_combined") {
+    fold_rocs <- run_cross_validation(train_data_combined, species_list$model_combined, train_meta)
+  }
+  
+  # 计算平均ROC
+  all_specificities <- unlist(lapply(fold_rocs, `[[`, "specificity"))
+  all_sensitivities <- unlist(lapply(fold_rocs, `[[`, "sensitivity"))
+  
+  # 创建平均曲线
+  mean_specificity <- unique(sort(all_specificities))
+  mean_sensitivity <- sapply(mean_specificity, function(spec) {
+    mean(all_sensitivities[all_specificities == spec], na.rm = TRUE)
+  })
+
+  # 保存平均ROC
+  roc_data_combined_all <- rbind(roc_data_combined_all, data.frame(
+    specificity = mean_specificity,
+    sensitivity = mean_sensitivity,
+    model = model_name
+  ))
+}
+
+# 绘制 ROC 曲线 并保存为PNG和PDF格式  
+ggplot_obj <- ggplot(roc_data_combined_all, aes(x = 1 - specificity, y = sensitivity, color = model)) +  
+  geom_line(size = 1.2) +  # 绘制各模型的曲线  
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +  
+  labs(x = "1 - Specificity (False Positive Rate)", y = "Sensitivity (True Positive Rate)", 
+       title = "Average ROC Curves for SVM Models with 5-Fold Cross-Validation") +  
+  theme_minimal() +  
+  theme(panel.grid.major = element_line(color = "lightgray"),   
+        panel.grid.minor = element_line(color = "lightgray"),   
+        panel.border = element_rect(color = "black", fill = NA),  
+        axis.line = element_line(color = "black")) +   
+  scale_color_manual(values = c("model_a" = "blue", 
+                                 "model_b" = "green", 
+                                 "model_f" = "purple", 
+                                 "model_v" = "orange", 
+                                 "model_combined" = "red")) +  
+  theme(legend.title = element_blank())  
+
+# 保存图形为PNG和PDF格式  
+output_dir <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/maunscript/6.17一修/check_fig/machine"
+
+ggsave(filename = file.path(output_dir, "roc_svm_check.png"),   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+
+ggsave(filename = file.path(output_dir, "roc_svm_check.pdf"),   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+```
+
+##svm
+```{r pressure, echo=FALSE}
+library(e1071)        # 支持向量机的包  
+library(caret)        # 用于混淆矩阵及其他功能  
+library(ggplot2)      # 画图包  
+library(pROC)         # 用于 ROC 曲线  
+library(dplyr)        # 数据操作包  
+library(readxl)      # 读取 Excel 文件的包  
+
+# 设置随机种子以确保结果可重复  
+set.seed(123)  
+
+# 指定模型工作表名称  
+model_sheets <- c("diff1", "modelA", "modelB", "modelF", "modelV")  
+
+# 定义用于分析每个模型的函数  
+analyze_model_svm <- function(sheet_name) {  
+    # 从Excel文件中读取结果  
+    de_results <- read_excel("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/enhance volcnao/g/DESeq2_results1.xlsx",   
+                              sheet = sheet_name)  
+
+    # 获取分析中涉及的物种列表  
+    species_list <- de_results$species  
+
+    # 提取物种丰度数据  
+    abundance_data <- g[species_list, ]  
+    abundance_data <- as.data.frame(t(abundance_data))  
+    rownames(abundance_data) <- colnames(g[species_list, ])  
+
+    # 提取META数据框中的协变量列  
+    meta_covariates <- META %>% select(Therapy, Antibiotics, Cluster)  
+
+    # 合并丰度数据与协变量  
+    combined_data <- merge(abundance_data, meta_covariates, by = "row.names", all.x = TRUE)  
+    combined_data <- combined_data %>% select(-Row.names)  
+
+    # 替换空字符串为 "no"  
+    combined_data <- combined_data %>% mutate(Antibiotics = ifelse(Antibiotics == "", "no", Antibiotics))   
+    combined_data <- combined_data %>% mutate(Cluster = as.factor(Cluster))  
+
+    # 创建训练集和测试集  
+    train_index <- createDataPartition(combined_data$Cluster, p = 0.7, list = FALSE)  
+    train_data <- combined_data[train_index, ]  
+    test_data <- combined_data[-train_index, ]  
+
+    # 提取自变量（丰度数据）和因变量（Cluster）  
+    train_X <- train_data %>% select(where(is.numeric))  
+    train_y <- as.factor(train_data$Cluster)  
+
+    # 确保测试集的因子水平与训练集一致  
+    test_data$Cluster <- factor(test_data$Cluster, levels = levels(train_y))  
+
+    # 训练支持向量机模型  
+    svm_model <- svm(train_X, train_y, kernel = "radial", probability = TRUE)  
+
+    # 在测试集上进行预测  
+    predictions_prob_svm <- predict(svm_model, test_data %>% select(where(is.numeric)), probability = TRUE)  
+    predictions_svm <- as.vector(predictions_prob_svm)  
+
+    # 确保预测结果的因子水平与训练集一致  
+    predictions_svm <- factor(predictions_svm, levels = levels(train_y))  
+
+    # 计算混淆矩阵  
+    confusion_matrix_svm <- confusionMatrix(predictions_svm, test_data$Cluster)  
+
+    # 输出混淆矩阵及指标  
+    cat("混淆矩阵:\n")  
+    print(confusion_matrix_svm)  
+
+    cat("模型准确率:", confusion_matrix_svm$overall['Accuracy'], "\n")  
+    cat("Kappa:", confusion_matrix_svm$overall['Kappa'], "\n")  
+    cat("每个类的精确度和召回率:\n")  
+    print(confusion_matrix_svm$byClass)  
+
+    # 计算并打印AUC值  
+    # 获取测试集预测的概率（假设每个类的概率都将输出）  
+    predictions_prob <- attr(predictions_prob_svm, "probabilities")  
+    
+    prob_class_1_svm <- predictions_prob[, 2]  # 假设第二列是类别 1 的概率  
+    roc_result_svm <- roc(test_data$Cluster, prob_class_1_svm, levels = levels(train_y))  
+    auc_value <- auc(roc_result_svm)  
+    cat("AUC值:", auc_value, "\n")  # 打印AUC值  
+
+    # 返回 ROC 数据  
+    roc_data_svm <- data.frame(  
+        specificity = 1 - roc_result_svm$specificities,  
+        sensitivity = roc_result_svm$sensitivities,  
+        model = switch(sheet_name,  
+                       "diff1" = "Combine",  
+                       "modelA" = "Arc",  
+                       "modelB" = "Bac",  
+                       "modelF" = "Fun",  
+                       "modelV" = "Vir")  
+    )  
+    return(roc_data_svm)  
+}  
+
+# 用于存储所有模型的ROC数据的数据框列表  
+roc_data_combined <- data.frame()  
+
+# 分析不同工作表并生成各自的数据框  
+for (sheet in model_sheets) {  
+    roc_data_combined <- rbind(roc_data_combined, analyze_model_svm(sheet))  
+}  
+
+# 将model列转为因子并设置顺序  
+roc_data_combined$model <- factor(roc_data_combined$model,   
+                                   levels = c("Combine", "Bac", "Arc", "Fun", "Vir"))  
+
+# 绘制 ROC 曲线 并保存为 png 和 pdf 格式  
+ggplot_obj <- ggplot(roc_data_combined, aes(x = specificity, y = sensitivity, color = model)) +  
+    geom_line() +  # 简单绘制各模型的曲线  
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +  
+    labs(x = "1 - Specificity (False Positive Rate)", y = "Sensitivity (True Positive Rate)") +  
+    theme_minimal() +  
+    theme(panel.grid.major = element_line(color = "lightgray"),   
+          panel.grid.minor = element_line(color = "lightgray"),   
+          panel.border = element_rect(color = "black", fill = NA),  
+          axis.line = element_line(color = "black")) +   
+    scale_color_manual(values = c("Combine" = "red", "Bac" = "green", "Arc" = "blue", "Fun" = "purple", "Vir" = "orange")) +  
+    theme(legend.title = element_blank())  
+
+# 保存图形为PNG和PDF格式  
+ggsave(filename = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result3/roc_svm.png",   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+
+ggsave(filename = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result3/roc_svm.pdf",   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+```
+
+##GBM
+```{r pressure, echo=FALSE}
+library(gbm)          # 导入 GBM 包  
+library(caret)        # 用于混淆矩阵及其他功能  
+library(pROC)         # 用于 ROC 曲线  
+library(dplyr)        # 数据操作包  
+library(ggplot2)      # 画图包  
+library(readxl)       # 读取 Excel 文件的包  
+
+# 设置随机种子以确保结果可重复  
+set.seed(123)  
+
+# 指定模型工作表名称  
+model_sheets <- c("diff1", "modelA", "modelB", "modelF", "modelV")  
+
+# 定义用于分析每个模型的函数  
+analyze_model_gbm <- function(sheet_name) {  
+    # 从Excel文件中读取结果  
+    de_results <- read_excel("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/enhance volcnao/g/DESeq2_results1.xlsx",   
+                              sheet = sheet_name)  
+
+    # 获取分析中涉及的物种列表  
+    species_list <- de_results$species  
+
+    # 提取物种丰度数据  
+    abundance_data <- g[species_list, ]  
+    abundance_data <- as.data.frame(t(abundance_data))  
+    rownames(abundance_data) <- colnames(g[species_list, ])  
+
+    # 提取META数据框中的协变量列  
+    meta_covariates <- META %>% select(Therapy, Antibiotics, Cluster)  
+
+    # 合并丰度数据与协变量  
+    combined_data <- merge(abundance_data, meta_covariates, by = "row.names", all.x = TRUE)  
+    combined_data <- combined_data %>% select(-Row.names)  
+
+    # 替换空字符串为 "no"  
+    combined_data <- combined_data %>% mutate(Antibiotics = ifelse(Antibiotics == "", "no", Antibiotics))   
+
+    # 转换 Cluster 列的值为 0 和 1，并确保是数值型  
+    combined_data <- combined_data %>%   
+        mutate(Cluster = ifelse(Cluster == 2, 1, 0),  # 转换 Cluster 列的值  
+               Cluster = as.numeric(Cluster))  # 确保 Cluster 列是数值型  
+
+    # 创建 GBM 专属的副本数据框    
+    gbm_data <- combined_data %>%  
+      mutate(Therapy = as.factor(Therapy),      # 确保 Therapy 列是因子  
+             Antibiotics = as.factor(Antibiotics),  # 确保 Antibiotics 列是因子  
+             across(where(is.numeric), ~ ifelse(is.na(.), 0, .)))  # 替换缺失值为 0  
+
+    # 创建训练集和测试集  
+    train_index <- createDataPartition(gbm_data$Cluster, p = 0.7, list = FALSE)  
+    train_data <- gbm_data[train_index, ]  
+    test_data <- gbm_data[-train_index, ]  
+
+    # 确保训练集中有足够的类来进行 GBM 训练  
+    if (length(unique(train_data$Cluster)) < 2) {  
+      stop("训练集中的 Cluster 类别不足以进行训练。")  
+    }  
+
+    # 训练 GBM 模型  
+    gbm_model <- gbm(  
+      formula = Cluster ~ .,                      # 包括所有的自变量  
+      distribution = "bernoulli",                 # 二分类问题  
+      data = train_data,                          # 训练数据  
+      n.trees = 100,                              # 树的数量  
+      interaction.depth = 3,                      # 最大深度  
+      n.minobsinnode = 10,                        # 最小节点数  
+      shrinkage = 0.01,                           # 学习率  
+      verbose = FALSE                             # 静默模式  
+    )  
+
+    # 在测试集上获取预测的概率  
+    predictions_prob_gbm <- predict(gbm_model, newdata = test_data, n.trees = 100, type = "response")  
+
+    # 将预测结果转换为类别  
+    predicted_classes_gbm <- ifelse(predictions_prob_gbm > 0.5, 1, 0)  # 根据概率转换为 0 或 1  
+    predicted_classes_gbm <- factor(predicted_classes_gbm, levels = c(0, 1))  # 转换为因子类型  
+
+    # 计算混淆矩阵  
+    confusion_matrix_gbm <- confusionMatrix(predicted_classes_gbm, factor(test_data$Cluster))  
+
+    # 输出混淆矩阵及指标  
+    cat("混淆矩阵:\n")  
+    print(confusion_matrix_gbm)  
+    cat("模型准确率:", confusion_matrix_gbm$overall['Accuracy'], "\n")  
+    cat("Kappa:", confusion_matrix_gbm$overall['Kappa'], "\n")  
+    cat("每个类的精确度和召回率:\n")  
+    print(confusion_matrix_gbm$byClass)  
+
+    # 计算并打印AUC值  
+    roc_result_gbm <- roc(test_data$Cluster, predictions_prob_gbm)  
+    auc_value_gbm <- auc(roc_result_gbm)  
+    cat("AUC值:", auc_value_gbm, "\n")  # 打印AUC值  
+
+    # 返回 ROC 数据  
+    roc_data_gbm <- data.frame(  
+        specificity = 1 - roc_result_gbm$specificities,  
+        sensitivity = roc_result_gbm$sensitivities,  
+        model = switch(sheet_name,  
+                       "diff1" = "Combine",  
+                       "modelA" = "Arc",  
+                       "modelB" = "Bac",  
+                       "modelF" = "Fun",  
+                       "modelV" = "Vir")  
+    )  
+    return(roc_data_gbm)  
+}  
+
+# 用于存储所有模型的ROC数据的数据框列表  
+roc_data_combined <- data.frame()  
+
+# 分析不同工作表并生成各自的数据框  
+for (sheet in model_sheets) {  
+    roc_data_combined <- rbind(roc_data_combined, analyze_model_gbm(sheet))  
+}  
+
+# 确保 roc_data_combined 中的 model 列是因子，并设置顺序  
+roc_data_combined$model <- factor(roc_data_combined$model,  
+                                   levels = c("Combine", "Bac", "Arc", "Fun", "Vir"))  
+
+# 绘制 ROC 曲线 并保存为 PNG 和 PDF 格式  
+ggplot_obj <- ggplot(roc_data_combined, aes(x = specificity, y = sensitivity, color = model)) +  
+    geom_line() +  # 简单绘制各模型的曲线  
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +  
+    labs(x = "1 - Specificity (False Positive Rate)", y = "Sensitivity (True Positive Rate)") +  
+    theme_minimal() +  
+    theme(panel.grid.major = element_line(color = "lightgray"),   
+          panel.grid.minor = element_line(color = "lightgray"),   
+          panel.border = element_rect(color = "black", fill = NA),  
+          axis.line = element_line(color = "black")) +   
+    scale_color_manual(values = c("Combine" = "red", "Bac" = "green", "Arc" = "blue", "Fun" = "purple", "Vir" = "orange")) +  
+    theme(legend.title = element_blank())  
+
+# 保存图形为 PNG 和 PDF 格式  
+ggsave(filename = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result3/roc_gbm.png",   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+
+ggsave(filename = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result3/roc_gbm.pdf",   
+       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+
+```

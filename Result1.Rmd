@@ -1,0 +1,648 @@
+---
+title: "Figure1"
+author: "qiao"
+date: "2025-06-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE) 
+library(foreach)
+library(reshape2)
+library(corrplot)
+library(ggplot2)
+library(patchwork)
+library(vegan)
+library(phyloseq)
+library(ggpubr)
+library(microbiome)
+library(pheatmap)
+library(doParallel) 
+```
+
+```{r pressure, echo=FALSE}
+##预处理
+```{r}
+# 加载所需的R包  
+library(foreach)  
+library(reshape2)  
+library(corrplot)  
+library(ggplot2)  
+library(patchwork)  
+library(vegan)  
+library(phyloseq)  
+library(ggpubr)  
+library(microbiome)  
+library(pheatmap)  
+library(doParallel) 
+library(phyloseq)
+
+# 读取数据  
+otu_s <- read.csv("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rawdata/icb.k2s.csv",header = TRUE, sep = ',', row.names = 1)  
+tax <- read.csv("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rawdata/tax.csv",header = TRUE, sep = ',', row.names = 1)  
+meta <- read.csv("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rawdata/metadata.csv",header = TRUE, sep = ',', row.names = 1, fileEncoding = "UTF-8")  
+colnames(otu_s) <- rownames(meta)  
+
+# 创建phyloseq对象  
+OTU <- otu_table(otu_s, taxa_are_rows = TRUE)  
+TAX <- tax_table(as.matrix(tax))  
+META <- sample_data(meta)  
+s.phyloseq <- phyloseq(OTU, TAX, META)  
+
+# 筛选数据  
+s.great <- subset_samples(s.phyloseq , 
+                           Response != "" &
+                           Host == "Human" &
+                           AssayType == "WGS" & 
+                           k__Archaea > 300 & 
+                           k__Bacteria > 300 &
+                           k__Fungi > 300 & 
+                           k__Viruses > 300)
+
+## 过滤掉流行率小于10%的物种
+sps = filter_taxa(s.great, function(x) sum(x > 0) > (0.1*length(x)), TRUE)
+
+s <- as.data.frame(otu_table(sps))  
+taxonomy <- as.data.frame(tax_table(sps))  
+META <- as.data.frame(sample_data(sps)) 
+META <- data.frame(META) 
+META <- META %>%  
+  mutate(Host_disease = ifelse(Host_disease == "Melonoma", "Melanoma", Host_disease))
+
+ 
+modify_names <- function(otu_name) {  
+  # 分割命名  
+  parts <- unlist(strsplit(otu_name, "\\|"))  
+
+  # 提取界和种  
+  kingdom <- gsub("k__", "", parts[1])  
+
+  # 查找包含种信息的元素  
+  species_index <- grep("^s__", parts)  
+
+  # 如果找到种信息，则提取种名；否则，返回 NA  
+  if (length(species_index) > 0) {  
+    species <- gsub("s__", "", parts[species_index[1]])  
+  } else {  
+    species <- NA  # 或者其他你认为合适的缺失值表示  
+  }  
+
+  # 确定界水平分类简称  
+  kingdom_initial <- switch(kingdom,  
+                             "Archaea" = "A",  
+                             "Bacteria" = "B",  
+                             "Fungi" = "F",  
+                             "Viruses" = "V",  
+                             "")  
+
+  # 生成新的物种名  
+  # 如果 species 是 NA，则返回 "界_Unknown"，否则返回 "界_种"  
+  if (is.na(species)) {  
+    new_name <- paste(kingdom_initial, "Unknown", sep = "_")  
+  } else {  
+    new_name <- paste(kingdom_initial, species, sep = "_")  
+  }  
+  return(new_name)  
+} 
+
+# 获取原始行名  
+original_rownames <- rownames(s)  
+
+# 应用函数修改行名  
+new_rownames <- sapply(original_rownames, modify_names)  
+
+# 创建一个逻辑向量，指示哪些行没有种名  
+rows_to_keep <- new_rownames != "V_" & new_rownames != "A_" & new_rownames != "B_" & new_rownames != "F_"  
+
+# 使用逻辑向量来子集数据框  
+s <- s[rows_to_keep, ]  
+
+# 获取过滤后的行名  
+new_rownames <- new_rownames[rows_to_keep]  
+
+# 使用 make.names() 确保行名的唯一性  
+new_rownames <- make.names(new_rownames, unique = TRUE)  
+
+# 将新的行名赋给数据框  
+rownames(s) <- new_rownames  
+
+# 删除此代码块中间变量  
+rm(original_rownames, rows_to_keep,meta,otu_s,s.great,s.phyloseq,tax)  
+
+```
+
+##wSNF
+```{r pressure, echo=FALSE}
+library("SNFtool")  
+library("vegan")  
+library("reticulate")  
+library("phyloseq")  
+library("microbiome")  
+
+# 1. 找到 Python 解释器的路径，并替换下面的路径  
+# 2. 确保该 Python 环境已经安装了 sklearn 包  
+use_python("/opt/anaconda3/bin/python") # 替换为你找到的 Python 解释器路径  
+# 或者，如果你使用 virtualenv 或 conda environment：  
+# use_virtualenv("your_virtualenv_name") # 或者 use_condaenv("your_condaenv_name")  
+
+source("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/script/function_snf.R")  
+source_python("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/script/sil.py")  
+
+# 假设你的 s 数据框已经存在，并且行是物种名，列是样本名  
+# 假设你的 META 数据框已经存在，并且行是样本，包含 Response 信息  
+
+# 1. Hellinger 转换  
+rel_s <- microbiome::transform(s, "hellinger")  
+
+# 2. 分割数据框  
+arc_rows <- grepl("^A_", rownames(rel_s))  
+bac_rows <- grepl("^B_", rownames(rel_s))  
+fun_rows <- grepl("^F_", rownames(rel_s))  
+vir_rows <- grepl("^V_", rownames(rel_s))  
+
+a_data <- rel_s[arc_rows, ]  
+b_data <- rel_s[bac_rows, ]  
+f_data <- rel_s[fun_rows, ]  
+v_data <- rel_s[vir_rows, ]  
+
+# 3. 检查样本名称是否一致  
+if (!all(colnames(a_data) == colnames(b_data)) ||  
+    !all(colnames(a_data) == colnames(f_data)) ||  
+    !all(colnames(a_data) == colnames(v_data))) {  
+  stop("样本名称不一致，请检查数据！")  
+}
+# 4. 计算 Bray-Curtis 距离  
+a_dsim <- vegdist(t(a_data), method='bray', diag=TRUE, upper=TRUE)  
+b_dsim <- vegdist(t(b_data), method='bray', diag=TRUE, upper=TRUE)  
+f_dsim <- vegdist(t(f_data), method='bray', diag=TRUE, upper=TRUE)  
+v_dsim <- vegdist(t(v_data), method='bray', diag=TRUE, upper=TRUE)  
+
+# 5. Mantel test  
+mantel(a_dsim, f_dsim ,method = "spearman")
+#Mantel statistic based on Spearman's rank correlation rho 
+#Call:
+#mantel(xdis = a_dsim, ydis = f_dsim, method = "spearman") 
+#Mantel statistic r: 0.7181 
+#      Significance: 0.001 
+#Upper quantiles of permutations (null model):
+#   90%    95%  97.5%    99% 
+#0.0297 0.0395 0.0461 0.0527 
+#Permutation: free
+#Number of permutations: 999
+
+mantel(a_dsim, v_dsim ,method = "spearman") 
+#Mantel statistic based on Spearman's rank correlation rho 
+#Call:
+#mantel(xdis = a_dsim, ydis = v_dsim, method = "spearman") 
+#Mantel statistic r: 0.2374 
+#      Significance: 0.001 
+#Upper quantiles of permutations (null model):
+#   90%    95%  97.5%    99% 
+#0.0216 0.0292 0.0348 0.0420 
+#Permutation: free
+#Number of permutations: 999
+
+mantel(b_dsim, f_dsim ,method = "spearman")
+#Mantel statistic based on Spearman's rank correlation rho 
+#Call:
+#mantel(xdis = b_dsim, ydis = f_dsim, method = "spearman") 
+#Mantel statistic r: 0.6354 
+#      Significance: 0.001 
+#Upper quantiles of permutations (null model):
+#   90%    95%  97.5%    99% 
+#0.0288 0.0383 0.0491 0.0563 
+#Permutation: free
+#Number of permutations: 999
+
+mantel(b_dsim, v_dsim ,method = "spearman")
+#Mantel statistic based on Spearman's rank correlation rho 
+#Call:
+#mantel(xdis = b_dsim, ydis = v_dsim, method = "spearman") 
+#Mantel statistic r: 0.3107 
+#      Significance: 0.001 
+#Upper quantiles of permutations (null model):
+#   90%    95%  97.5%    99% 
+#0.0225 0.0302 0.0360 0.0446 
+#Permutation: free
+#Number of permutations: 999
+
+mantel(f_dsim, v_dsim ,method = "spearman") 
+#Mantel statistic based on Spearman's rank correlation rho 
+#Call:
+#mantel(xdis = f_dsim, ydis = v_dsim, method = "spearman") 
+#Mantel statistic r: 0.2369 
+#      Significance: 0.001 
+#Upper quantiles of permutations (null model):
+#   90%    95%  97.5%    99% 
+#0.0258 0.0319 0.0388 0.0485 
+#Permutation: free
+#Number of permutations: 999
+
+# 6. 缺失值处理  
+a_dsim[is.nan(a_dsim)] <- 0  
+b_dsim[is.nan(b_dsim)] <- 0  
+f_dsim[is.nan(f_dsim)] <- 0  
+v_dsim[is.nan(v_dsim)] <- 0  
+
+# 7. 构建相似性矩阵  
+W1 <- (as.matrix(a_dsim) - 1) * -1  
+W2 <- (as.matrix(b_dsim) - 1) * -1  
+W3 <- (as.matrix(f_dsim) - 1) * -1  
+W4 <- (as.matrix(v_dsim) - 1) * -1  
+
+# 8. 权重分配  
+weight_a <- dim(a_data)[2] # 修改为 dim(a_data)[2]，因为列是样本  
+weight_b <- dim(b_data)[2]  
+weight_f <- dim(f_data)[2]  
+weight_v <- dim(v_data)[2]  
+
+weights_snf <- c(weight_a, weight_b, weight_f, weight_v)  
+
+# 9. 多次迭代，构建相似性矩阵w  
+sil_values <- c()  
+for (i in 2:100) {  
+  W <- SNF_weighted_iter(list(W1, W2, W3, W4), i, 20, weight = weights_snf)  
+  z <- estimateNumberOfClustersGivenGraph(W)[[1]]  
+  labels <- spectralClustering(W, z)  
+  
+  # 将 W 转换为 NumPy 数组  
+  W_np <- r_to_py(W)  
+  labels_np <- r_to_py(labels)  
+
+  sil_values <- c(sil_values, silhouette_score(W_np, labels_np))  
+}  
+tuned_k <- which.max(sil_values) + 1  
+print(sil_values)
+# 10. 谱聚类  
+W <- SNF_weighted_iter(list(W1, W2, W3, W4), tuned_k, 20, weight = weights_snf)  
+z <- estimateNumberOfClustersGivenGraph(W)[[1]]  
+labels <- spectralClustering(W, z)  
+print(table(labels))  
+
+# 11. 结果输出  
+lab <- as.data.frame(labels, row.names = colnames(s))  
+
+# 提取 Response 信息  
+lab$response <- META[rownames(lab),]$Response  
+
+t <- table(lab)  
+#labels
+#  1   2 
+#524 441 
+META$Cluster <- lab$labels  
+write.csv(lab, paste("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rawdata", ".csv", sep=''))
+write.csv(META, paste("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rawdata/META", ".csv", sep=''))
+write.csv(W, paste("matrix", ".csv", sep=''))  
+write.csv(t, paste("table", ".csv", sep=''))
+```
+
+
+##聚类热图
+```{r pressure, echo=FALSE}
+library(pheatmap)  
+library(RColorBrewer)  
+library(ComplexHeatmap)  
+library(grid)  
+library(circlize)  
+# 准备数据  
+# 假设您已经运行了之前的 wSNF 聚类代码，并得到了以下变量：  
+# - W: wSNF 融合后的相似性矩阵  
+# - labels: 样本的聚类标签  
+
+# 确保 W 是一个矩阵  
+W <- as.matrix(W)  
+
+# Min-Max 归一化  
+W_min <- min(W, na.rm = TRUE)  # 获取最小值  
+W_max <- max(W, na.rm = TRUE)  # 获取最大值  
+W_normalized <- (W - W_min) / (W_max - W_min)  # 归一化到0-1范围  
+
+# 直接使用归一化后的结果作为相似度矩阵  
+W_transformed <- W_normalized  
+
+# 下面的代码与之前相同，保持不变  
+diag(W_transformed) <- 1  
+
+# 根据聚类标签对样本进行排序  
+cluster_order <- order(labels)  # 获取聚类标签的排序索引  
+W_reordered <- W_transformed[cluster_order, cluster_order]  # 重新排序相似度矩阵  
+labels_reordered <- labels[cluster_order]  # 重新排序聚类标签  
+
+# 创建颜色注释  
+clusters <- as.factor(labels_reordered)  # 使用重新排序的标签  
+num_clusters <- length(unique(clusters))  
+
+# 定义聚类颜色  
+cluster_colors <- c("#990026", "#1e4e8a")  
+names(cluster_colors) <- levels(clusters)  
+
+# 创建 ComplexHeatmap 注释  
+row_annotation <- HeatmapAnnotation(  
+  df = data.frame(Cluster = clusters),  
+  col = list(Cluster = cluster_colors),  
+  which = "row",  
+  show_legend = FALSE,  
+  width = unit(0.5, "cm"),  
+  show_annotation_name = FALSE  # 移除竖轴标签  
+)  
+
+col_annotation <- HeatmapAnnotation(  
+  df = data.frame(Cluster = clusters),  
+  col = list(Cluster = cluster_colors),  
+  which = "column",  
+  show_legend = FALSE,  
+  height = unit(0.5, "cm"),  
+  show_annotation_name = FALSE  # 移除横轴标签  
+)  
+
+# 提取非对角线元素的最小值和最大值  
+non_diag_values <- W_reordered[!diag(TRUE, nrow(W_reordered))]  # 获取非对角线元素  
+min_value <- min(non_diag_values, na.rm = TRUE)  # 获取最小值，去除 NA  
+max_value <- max(non_diag_values, na.rm = TRUE)  # 获取最大值，去除 NA  
+
+# 定义热图颜色梯度，反转为最大值到最小值的顺序  
+heatmap_breaks <- seq(max_value, min_value, length.out = 10)  # 使用非对角线元素的最大最小值作为断点  
+heatmap_colors <- colorRamp2(heatmap_breaks,   
+                              c("#6a0624", "#8b0824", "#7bc2bc",  
+                                "#feab88", "#fbd2bc", "#c7e0ed",  
+                                "#0fafd2", "#327db7", "#134b87", "#053061"))  
+
+# 绘制 ComplexHeatmap 热图  
+ht_name <- "Min-Max Normalized W"  # 修改热图标题  
+ht <- Heatmap(  
+  W_reordered,  
+  cluster_rows = FALSE,  
+  cluster_columns = FALSE,  
+  show_row_names = FALSE,  
+  show_column_names = FALSE,  
+  col = heatmap_colors,  
+  name = ht_name,  
+  top_annotation = col_annotation,  # 添加横轴颜色条  
+  left_annotation = row_annotation,  
+  show_heatmap_legend = TRUE,  # 显示热图图例  
+  heatmap_legend_param = list(  
+    title = "Similarity",  
+    legend_height = unit(4, "cm")  
+  ),  
+  rect_gp = gpar(col = "white", lwd = 0),  # 移除热图单元格之间的分割线  
+  use_raster = FALSE,  # 禁用栅格化，确保框线清晰  
+  border = TRUE, # 显示热图边框  
+  cell_fun = function(j, i, x, y, width, height, fill) {  
+    # 将对角线元素的颜色设置为灰色  
+    if (i == j) {  
+      grid.rect(x, y, width, height,  
+                gp = gpar(fill = "gray", col = NA))  # 对角线设置为灰色  
+    } else {  
+      grid.rect(x, y, width, height,  
+                gp = gpar(fill = fill, col = NA))  # 其他元素使用原始颜色  
+    }  
+    # 添加聚类分界线  
+    if (i < length(labels_reordered) && labels_reordered[i] != labels_reordered[i + 1]) {  
+      grid.rect(x, y, width, height,  
+                gp = gpar(col = "black", fill = NA, lwd = 2))  # 增加分界线宽度  
+    }  
+    if (j < length(labels_reordered) && labels_reordered[j] != labels_reordered[j + 1]) {  
+      grid.rect(x, y, width, height,  
+                gp = gpar(col = "black", fill = NA, lwd = 2))  # 增加分界线宽度  
+    }  
+  }  
+)  
+
+# 添加新的图例  
+cluster_legend <- Legend(  
+  at = levels(clusters),  
+  title = "Cluster",  
+  legend_gp = gpar(fill = cluster_colors[levels(clusters)])  
+)  
+# 保存图像到 PNG  
+png_path <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result1/sFigure1/clustering.png"  # 指定保存路径  
+png(png_path, width = 800, height = 800, res = 300)  # 创建 PNG 文件  
+draw(ht, heatmap_legend_list = list(cluster_legend))  # 绘制热图和图例  
+dev.off()  # 关闭 PNG 设备  
+
+# 保存图像到 PDF  
+pdf_path <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result1/sFigure1/clustering.pdf"  # 指定存储路径  
+pdf(pdf_path, width = 8, height = 8)  # 创建 PDF 文件  
+draw(ht, heatmap_legend_list = list(cluster_legend))  # 绘制热图和图例  
+dev.off()  # 关闭 PDF 设备  
+
+cat("热图已保存到：\n", pdf_path, "\n", png_path, "\n")  
+```
+
+
+
+
+##聚类tSNE图
+```{r pressure, echo=FALSE}
+# 加载必要的库  
+library(Rtsne)  # Rtsne包用于t-SNE降维  
+library(vegan)  # vegan包用于PERMANOVA分析  
+library(ggplot2)  # ggplot2包用于绘图  
+
+# 复制 W 并将对角线值设置为 1  
+W_copy <- W  # 使用您的实际相似性矩阵  
+diag(W_copy) <- 1  # 将对角线的值修改为 1  
+
+# 将相似性矩阵转换为距离矩阵  
+D <- 1 - W_copy  # 假设 W_copy 是新的相似性矩阵  
+
+# 假设 lab 是你的数据框，包含聚类标签，列名为 labels  
+# lab <- ...  # 取消注释并替换为实际的聚类标签数据框  
+
+# 提取聚类标签  
+labels <- lab$labels  # 提取 labels 列  
+
+# 应用 t-SNE  
+tsne_result <- Rtsne(D, perplexity = 30, check_duplicates = FALSE)  
+
+# 提取 t-SNE 结果并转换为数据框  
+tsne_df <- data.frame(tsne_result$Y)  
+colnames(tsne_df) <- c("tSNE_1", "tSNE_2")  
+tsne_df$labels <- as.factor(labels)  # 添加 labels 标签并转换为因子类型  
+
+# 自定义颜色映射  
+custom_colors <- c("1" = "#990026", "2" = "#1e4e8a")    
+custom_fill_colors <- c("1" = "#8a4048", "2" = "#26496d")   
+
+# 基本散点图，添加细胞类型  
+p <- ggplot(data = tsne_df, aes(x = tSNE_1, y = tSNE_2)) +  
+  geom_point(aes(color = labels), size = 3, alpha = 0.8)  # 使用 labels 作为颜色映射  
+
+# 添加填充型置信椭圆  
+p1 <- p +  
+  stat_ellipse(aes(color = labels, fill = labels),   
+               level = 0.95, linetype = 1, show.legend = FALSE,   
+               geom = 'polygon', alpha = 0.1) +  # 添加填充型置信椭圆  
+  scale_color_manual(values = custom_colors) +  # 设置边界颜色  
+  scale_fill_manual(values = custom_fill_colors) +  # 设置填充颜色  
+  theme_minimal() +  # 更改主题  
+  theme(  
+    panel.grid.major = element_blank(),  # 删掉主要网格线  
+    panel.grid.minor = element_blank(),  # 删掉次要网格线  
+    panel.border = element_rect(color = "black", fill = NA, size = 1),  # 加黑色框  
+    axis.ticks.length = unit(0.25, "cm"),  # 设置刻度线长度  
+    plot.margin = margin(1, 1, 1, 1)  # 添加边距以避免标签重叠  
+  )  
+
+# 进行 PERMANOVA 分析以获取 p 值  
+permanova_result <- adonis(D ~ labels, data = data.frame(labels = labels))  # 使用 labels 进行 PERMANOVA 分析  
+p_value <- permanova_result$aov.tab$`Pr(>F)`[1]  # 提取 p 值  
+
+# 在图上添加 p 值，格式为 P = 0.001，并使用斜体  
+p1 <- p1 + annotate("text", x = Inf, y = Inf, label = paste("P =", formatC(p_value, format = "f", digits = 3)),  
+                    hjust = 1.2, vjust = 2, color = "black", size = 5, fontface = "italic")  
+
+# 打印最终图形  
+print(p1)  
+
+# 保存图形为 PNG 和 PDF 格式  
+output_dir <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result1/D"  
+
+# 保存为 PNG  
+ggsave(filename = file.path(output_dir, "tsne_plot.png"), plot = p1, width = 7, height = 5, units = "in", dpi = 300)  
+
+# 保存为 PDF  
+ggsave(filename = file.path(output_dir, "tsne_plot.pdf"), plot = p1, width = 7, height = 5, units = "in")  
+
+# 打印 PERMANOVA 分析结果，包括实际的 p 值  
+f_statistic <- permanova_result$aov.tab$F[1]           # F 统计量  
+r_squared <- permanova_result$aov.tab$R2[1]             # 调整后的 R²  
+
+cat("PERMANOVA Analysis:\n")  
+cat("F-statistic: ", f_statistic, "\n")  
+cat("p-value: ", formatC(p_value, format = "f", digits = 6), "\n")  # 显示 p 值，保留 6 位小数  
+cat("Adjusted R²: ", r_squared, "\n")  
+```
+
+
+##门分类-热图
+```{r pressure, echo=FALSE}
+met <- meta(sps)
+dat <- melt(met[, c("k__Archaea", "k__Bacteria", "k__Fungi", "k__Viruses")])
+
+col4<- c( "#BE5C37", "#5B9C4B", "#507AAF", "#831A21")
+ggplot(data=dat, aes(x = variable, y = log(value), group=variable)) +
+    geom_boxplot(aes(x=variable, fill=variable), notch=FALSE) +
+    scale_fill_manual(values=col4) +
+    theme(title=element_text(size=14,color="#4F4F4F"))+
+    theme_classic()+ 
+    theme(axis.text.x = element_text(size=14),axis.text.y = element_text(size=14)) + 
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + 
+    theme(legend.title = element_blank())+ 
+    theme(legend.position='none')+
+    theme(plot.title = element_text(hjust = 0.5))+
+    labs(title= "Abundance in gut microbiome", y="log10(Reads count)", x="")
+
+
+met <- meta(sps)
+arc = subset_taxa(sps, k == "k__Archaea")
+bac = subset_taxa(sps, k == "k__Bacteria")
+fun = subset_taxa(sps, k == "k__Fungi")
+vir = subset_taxa(sps, k == "k__Viruses")
+
+arc@otu_table <- otu_table(t(t(arc@otu_table)/met$k__Archaea), taxa_are_rows = TRUE)
+bac@otu_table <- otu_table(t(t(bac@otu_table)/met$k__Bacteria), taxa_are_rows = TRUE)
+fun@otu_table <- otu_table(t(t(fun@otu_table)/met$k__Fungi), taxa_are_rows = TRUE)
+vir@otu_table <- otu_table(t(t(vir@otu_table)/met$k__Viruses), taxa_are_rows = TRUE)
+
+top60 = rbind(arc@otu_table[names(sort(taxa_sums(arc), TRUE)[1:15]),], 
+           bac@otu_table[names(sort(taxa_sums(bac), TRUE)[1:15]),], 
+           fun@otu_table[names(sort(taxa_sums(fun), TRUE)[1:15]),], 
+           vir@otu_table[names(sort(taxa_sums(vir), TRUE)[1:15]),])
+
+rownames(top60) <- tax[rownames(top60),]$s
+
+# 包
+library(pheatmap)  
+library(gridExtra)  
+library(cowplot)  
+library(Cairo)  
+library(grid)
+# 创建分块热图并保存为 gtable 对象  
+heatmap1 <- pheatmap(top60[1:15,],   
+                cluster_rows = TRUE,   
+                cluster_cols = FALSE,   
+                show_colnames = FALSE,  # 不显示列名  
+                border = FALSE,   
+                color = colorRampPalette(colors = c("#F7F7E9","#BE5C37"))(100),   
+                silent = TRUE,   
+                fontsize_row = 4,    
+                fontsize_col = 6,  
+                fontsize = 6,    
+                treeheight_row = 0)  
+
+heatmap2 <- pheatmap(top60[16:30,],   
+                cluster_rows = TRUE,   
+                cluster_cols = FALSE,   
+                show_colnames = FALSE,  
+                border = FALSE,   
+                color = colorRampPalette(colors = c("#F7F7E9","#5B9C4B"))(100),   
+                silent = TRUE,   
+                fontsize_row = 4,   
+                fontsize_col = 6,     
+                fontsize = 6,  
+                treeheight_row = 0)  
+
+heatmap3 <- pheatmap(top60[31:45,],   
+                cluster_rows = TRUE,   
+                cluster_cols = FALSE,   
+                show_colnames = FALSE,    
+                border = FALSE,   
+                color = colorRampPalette(colors = c("#F7F7E9","#507AAF"))(100),   
+                silent = TRUE,   
+                fontsize_row = 4,    
+                fontsize_col = 6,  
+                fontsize = 6,   
+                treeheight_row = 0)  
+
+heatmap4 <- pheatmap(top60[46:60,],   
+                cluster_rows = TRUE,   
+                cluster_cols = FALSE,   
+                show_colnames = FALSE,   
+                border = FALSE,   
+                color = colorRampPalette(colors = c("#F7F7E9","#831A21"))(100),   
+                silent = TRUE,   
+                fontsize_row = 4,   
+                fontsize_col = 6,   
+                fontsize = 6,  
+                treeheight_row = 0)  
+
+
+output_dir <- "/Users/qiaotong2023/Desktop/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/结果1 分子分型-临床特征相关性/结果1 icb分型/plot1/D_E"  
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)  
+
+
+ggsave(file.path(output_dir, "heatmap1.png"),   
+       heatmap1$gtable,   
+       width = 9, height = 4, units = "in", dpi=300)    
+ggsave(file.path(output_dir, "heatmap1.pdf"),   
+       heatmap1$gtable,   
+       width = 9, height = 4, units = "in", dpi=300)  
+
+ggsave(file.path(output_dir, "heatmap2.png"),   
+       heatmap2$gtable,   
+       width = 9, height = 4, units = "in", dpi=300)   
+ggsave(file.path(output_dir, "heatmap2.pdf"),   
+       heatmap2$gtable,   
+       width = 9, height = 4, units = "in", dpi=300)  
+
+ggsave(file.path(output_dir, "heatmap3.png"),   
+       heatmap3$gtable,   
+       width = 9, height = 4, units = "in", dpi=300)    
+ggsave(file.path(output_dir, "heatmap3.pdf"),   
+       heatmap3$gtable,   
+       width = 9, height = 4, units = "in", dpi=300)  
+
+ggsave(file.path(output_dir, "heatmap4.png"),   
+       heatmap4$gtable,   
+       width = 9, height = 4, units = "in", dpi=300)    
+ggsave(file.path(output_dir, "heatmap4.pdf"),   
+       heatmap4$gtable,   
+       width = 9, height = 4, units = "in", dpi=300)   
+```
+
+
+
+
+
+```

@@ -1,0 +1,578 @@
+---
+title: "Result2"
+author: "qiao"
+date: "2025-06-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+##C1/C2 R/NR、PFS>6_month
+```{r pressure, echo=FALSE}
+  
+library(dplyr)  
+library(ggplot2)  
+library(scales)  
+
+META_clean <- META %>%  
+  mutate(Response = recode(Response,  
+                           `Responder` = "R",  
+                           `Non_Responder` = "NR"),  
+         PFS_6_month = recode(PFS_6_month,  
+                               `Below` = "No",  
+                               `Above` = "Yes"))  
+
+
+pfs_colors <- c("C1/Yes" = "#990026", "C1/No" = "#CC6666",   
+                 "C2/Yes" = "#1e4e8a", "C2/No" = "#6699CC")  
+
+response_colors <- c("C1/R" = "#990026", "C1/NR" = "#CC6666",  
+                     "C2/R" = "#1e4e8a", "C2/NR" = "#6699CC")  
+
+  
+META_clean <- META_clean %>%  
+  mutate(PFS_group = case_when(  
+    Cluster == 1 & PFS_6_month == "Yes" ~ "C1/Yes",  
+    Cluster == 1 & PFS_6_month == "No" ~ "C1/No",  
+    Cluster == 2 & PFS_6_month == "Yes" ~ "C2/Yes",  
+    Cluster == 2 & PFS_6_month == "No" ~ "C2/No",  
+    TRUE ~ NA_character_))  
+
+
+pfs_summary <- META_clean %>%  
+  filter(!is.na(PFS_group)) %>%  
+  group_by(Cluster, PFS_group) %>%  
+  summarise(count = n(), .groups = 'drop') %>%  
+  group_by(Cluster) %>%  
+  mutate(percentage = count / sum(count))  
+
+  
+fisher_test_pfs <- fisher.test(table(META_clean$Cluster, META_clean$PFS_group))  
+
+  
+cat("\n---\nFisher 检验结果（PFS_6_month）：\n")  
+print(fisher_test_pfs)  
+
+ 
+if (fisher_test_pfs$p.value < 0.01) {  
+  p_value_text_pfs <- "P < 0.01"  
+} else if (fisher_test_pfs$p.value < 0.05) {  
+  p_value_text_pfs <- "P < 0.05"  
+} else {  
+  p_value_text_pfs <- paste("P =", format(fisher_test_pfs$p.value, nsmall = 3, digits = 3))  
+}  
+
+pfs_plot <- ggplot(pfs_summary, aes(x = as.factor(Cluster), y = percentage, fill = PFS_group)) +  
+  geom_bar(stat = "identity", position = "fill") +   
+  scale_y_continuous(labels = function(x) paste0(format(x * 100, nsmall = 0), "%"),  
+                     breaks = seq(0, 1, by = 0.25), limits = c(0, 1)) +  
+  theme_minimal() +  
+  scale_fill_manual(values = pfs_colors) +   
+  labs(x = "Cluster", y = "Percentage", fill = "PFS > 6_month") +  
+  theme(panel.grid.major = element_blank(),  
+        panel.grid.minor = element_blank(),  
+        panel.background = element_blank(),  
+        plot.background = element_rect(fill = "white"),  
+        text = element_text(color = "black"),  
+        axis.text = element_text(color = "black"),  
+        axis.title = element_text(size = 12),  
+        axis.ticks = element_line(color = "black"),  
+        axis.line = element_line(color = "black", linewidth = 0.5),  
+        panel.border = element_blank()) +  
+  ggtitle(bquote(italic(.(p_value_text_pfs)))) +    
+  theme(plot.title = element_text(hjust = 0.5))   
+
+pfs_save_path <- "/Users/qiaotong2023/Desktop/qt/科研/课题/题目1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/B"  
+dir.create(pfs_save_path, recursive = TRUE, showWarnings = FALSE)  
+ggsave(filename = file.path(pfs_save_path, "PFS_plot.png"), plot = pfs_plot, width = 6, height = 8, units = "in")  
+ggsave(filename = file.path(pfs_save_path, "PFS_plot.pdf"), plot = pfs_plot, width = 6, height = 8, units = "in")  
+
+
+rm(pfs_summary, pfs_plot, fisher_test_pfs, p_value_text_pfs, META_clean)  
+
+response_summary <- META %>%  
+  mutate(Response = recode(Response,  
+                           `Responder` = "R",  
+                           `Non_Responder` = "NR")) %>%  
+  filter(!is.na(Response)) %>%  
+  mutate(Group = recode(paste0("C", Cluster, "/", Response),  
+                         `C1/R` = "C1/R",  
+                         `C1/NR` = "C1/NR",  
+                         `C2/R` = "C2/R",  
+                         `C2/NR` = "C2/NR")) %>%  
+  filter(!is.na(Group)) %>%  
+  group_by(Cluster, Group) %>%  
+  summarise(count = n(), .groups = 'drop') %>%  
+  group_by(Cluster) %>%  
+  mutate(percentage = count / sum(count))  
+
+contingency_table <- table(META$Cluster,   
+                            factor(ifelse(META$Response == "Responder", "R", "NR")))  
+
+  
+fisher_test_response <- fisher.test(contingency_table)  
+
+if (fisher_test_response$p.value < 0.01) {  
+  p_value_text_response <- "P < 0.01"  
+} else if (fisher_test_response$p.value < 0.05) {  
+  p_value_text_response <- "P < 0.05"  
+} else {  
+  p_value_text_response <- paste("P =", format(fisher_test_response$p.value, nsmall = 3, digits = 3))  
+}  
+
+response_plot <- ggplot(response_summary, aes(x = as.factor(Cluster), y = percentage, fill = Group)) +  
+  geom_bar(stat = "identity", position = "fill") +   
+  scale_y_continuous(labels = function(x) paste0(format(x * 100, nsmall = 0), "%"),  
+                     breaks = seq(0, 1, by = 0.25), limits = c(0, 1)) +  
+  theme_minimal() +  
+  scale_fill_manual(values = response_colors) +   
+  labs(x = "Cluster", y = "Percentage", fill = "Response") +  
+  theme(panel.grid.major = element_blank(),  
+        panel.grid.minor = element_blank(),  
+        panel.background = element_blank(),  
+        plot.background = element_rect(fill = "white"),  
+        text = element_text(color = "black"),  
+        axis.text = element_text(color = "black"),  
+        axis.title = element_text(size = 12),  
+        axis.ticks = element_line(color = "black"),  
+        axis.line = element_line(color = "black", linewidth = 0.5),  
+        panel.border = element_blank()) +  
+  ggtitle(bquote(italic(.(p_value_text_response)))) +  
+  theme(plot.title = element_text(hjust = 0.5))    
+
+response_save_path <- "/Users/qiaotong2023/Desktop/qt/科研/课题/题目1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/B"  
+dir.create(response_save_path, recursive = TRUE, showWarnings = FALSE)  
+ggsave(filename = file.path(response_save_path, "Response_plot.png"), plot = response_plot, width = 6, height = 8, units = "in")  
+ggsave(filename = file.path(response_save_path, "Response_plot.pdf"), plot = response_plot, width = 6, height = 8, units = "in")  
+
+ 
+rm(response_summary, response_plot, fisher_test_response, p_value_text_response)  
+```
+
+##cancer type R/NR PFS
+```{r pressure, echo=FALSE}
+library(dplyr)  
+library(tidyr)  
+library(ggplot2)  
+library(ggtext)  
+
+colors_RandNR <- c(  
+  "C1/R" = "#990026",  
+  "C1/NR" = "#CC6666",  
+  "C2/R" = "#1e4e8a",  
+  "C2/NR" = "#6699CC"  
+)  
+
+colors_PFS <- c(  
+  "C1/No" = "#990026",  
+  "C1/Yes" = "#CC6666",  
+  "C2/No" = "#1e4e8a",  
+  "C2/Yes" = "#6699CC"  
+)  
+
+analyze_categorical_by_disease <- function(  
+  data,   
+  cluster_col,   
+  response_col,   
+  colors,   
+  save_dir,   
+  file_prefix,  
+  fisher_cols = NULL  
+) {  
+  
+  dir.create(save_dir, recursive = TRUE, showWarnings = FALSE)  
+  
+   
+  results <- data %>%  
+    group_by(Host_disease, !!sym(cluster_col), !!sym(response_col)) %>%  
+    summarise(  
+      Count = n(),   
+      .groups = 'drop_last'  
+    ) %>%  
+    mutate(Percentage = Count / sum(Count) * 100) %>%  
+    ungroup()  
+  
+  fisher_results <- data %>%  
+    group_by(Host_disease) %>%  
+    summarise(  
+      p_value = tryCatch({  
+        if (!is.null(fisher_cols)) {  
+          fisher.test(table(!!sym(fisher_cols[1]), !!sym(fisher_cols[2])))$p.value  
+        } else {  
+          fisher.test(table(!!sym(cluster_col), !!sym(response_col)))$p.value  
+        }  
+      }, error = function(e) NA),  
+      .groups = 'drop'  
+    )  
+  
+  for (disease in unique(results$Host_disease)) {  
+    disease_data <- results %>% filter(Host_disease == disease)  
+    p_value <- fisher_results$p_value[fisher_results$Host_disease == disease]  
+    
+    plot_data <- disease_data %>%  
+      group_by(!!sym(cluster_col)) %>%  
+      mutate(  
+        label = paste0("n=", Count),  
+        full_label = paste0(!!sym(response_col), "\n", label)  
+      )  
+    
+    p <- ggplot(plot_data, aes(x = !!sym(cluster_col), y = Percentage, fill = !!sym(response_col))) +  
+      geom_bar(stat = "identity", width = 0.7) +  
+      scale_fill_manual(values = colors) +  
+      scale_y_continuous(labels = scales::percent_format(scale = 1)) +  
+      labs(y = "Percentage (%)") +  
+      theme_minimal() +  
+      theme(  
+        legend.title = element_blank(),  
+        panel.grid.major = element_blank(),  
+        panel.grid.minor = element_blank(),  
+        axis.title.x = element_text(face = "plain", size = 12),  
+        axis.text.x = element_text(face = "plain", size = 10),  
+        axis.title.y = element_text(size = 12),  
+        legend.position = "top",  
+        legend.justification = c(0.5, 1)  
+      ) +  
+      geom_text(  
+        aes(label = label),  
+        position = position_stack(vjust = 0.5),  
+        color = "white",  
+        fontface = "bold"  
+      ) +  
+      annotate(  
+        "text",   
+        x = 1.5,   
+        y = 105,   
+        label = paste("p =", format(p_value, digits = 2)),   
+        size = 5  
+      ) +  
+      theme(panel.border = element_rect(color = "black", fill = NA, size = 1))  
+    
+    ggsave(  
+      filename = file.path(save_dir, paste0(disease, "_", file_prefix, "_Distribution.pdf")),   
+      plot = p,   
+      height = 8,   
+      width = 5,   
+      dpi = 300  
+    )  
+    ggsave(  
+      filename = file.path(save_dir, paste0(disease, "_", file_prefix, "_Distribution.png")),   
+      plot = p,   
+      height = 8,   
+      width = 5,   
+      dpi = 300  
+    )  
+  }  
+ 
+  write.csv(results,   
+            file.path(save_dir, paste0(file_prefix, "_Results.csv")),   
+            row.names = FALSE)  
+  
+  write.csv(fisher_results,   
+            file.path(save_dir, paste0(file_prefix, "_Fisher_Results.csv")),   
+            row.names = FALSE)  
+  
+  return(results)  
+}  
+
+response_analysis <- analyze_categorical_by_disease(  
+  data = META %>%   
+    mutate(  
+      Cluster_Response = paste0("C", Cluster, "/",   
+        recode(Response,   
+          "Responder" = "R",   
+          "Non_Responder" = "NR")  
+      )  
+    ),  
+  cluster_col = "Cluster",  
+  response_col = "Cluster_Response",  
+  colors = colors_RandNR,  
+  save_dir = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result1/sFigure1/cancerRNR",  
+  file_prefix = "RandNR",  
+  fisher_cols = c("Cluster", "Response")  
+)  
+
+pfs_analysis <- analyze_categorical_by_disease(  
+  data = META %>%   
+    mutate(PFS_6_month = recode(PFS_6_month,  
+                                 "Below" = "No",  
+                                 "Above" = "Yes")) %>%  # 修改 PFS_6_month 列  
+    filter(PFS_6_month %in% c("Yes", "No")) %>%  
+    mutate(  
+      Cluster_PFS = paste0("C", Cluster, "/", PFS_6_month)  
+    ),  
+  cluster_col = "Cluster",  
+  response_col = "Cluster_PFS",  
+  colors = colors_PFS,  
+  save_dir = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result1/sFigure1/cancerPFS",  
+  file_prefix = "PFS",  
+  fisher_cols = c("Cluster", "PFS_6_month")  
+)  
+```
+
+
+##C1/C2 clinical information
+```{r pressure, echo=FALSE}
+library(dplyr)  
+library(ggplot2)  
+library(scales)  
+
+categorical_cols <- c("Therapy", "Antibiotics", "Host_sex", "Age")  
+
+
+for (col in categorical_cols) {  
+    
+  META_clean <- META %>%  
+    filter(!!sym(col) != "") %>%  
+    mutate(Therapy = trimws(Therapy))  
+
+  if (col == "Therapy") {  
+    META_clean <- META_clean %>%  
+      filter(Therapy %in% c("PD-1/PD-L1", "PD1", "PD1/CTLA4"))    
+  }  
+
+  col_summary <- META_clean %>%  
+    group_by(Cluster, !!sym(col)) %>%  
+    summarise(count = n(), .groups = 'drop') %>%  
+    group_by(Cluster) %>%  
+    mutate(percentage = count / sum(count)) 
+  
+  total_counts <- col_summary %>%   
+    group_by(Cluster) %>%  
+    summarise(total = sum(count))  
+  
+  print(total_counts) 
+  print(col_summary)    
+
+
+  if (nrow(col_summary) == 0) {  
+    warning(paste("No data available for column:", col))  
+    next  
+  }  
+
+  fisher_test <- fisher.test(table(META_clean$Cluster, META_clean[[col]]))  
+
+  if (fisher_test$p.value < 0.01) {  
+    p_value_text <- "P < 0.01"  
+  } else if (fisher_test$p.value < 0.05) {  
+    p_value_text <- "P < 0.05"  
+  } else {  
+    p_value_text <- paste("P =", format(fisher_test$p.value, nsmall = 3, digits = 3))  
+  }  
+
+ 
+  plot <- ggplot(col_summary, aes(x = as.factor(Cluster), y = percentage, fill = !!sym(col))) +  
+    geom_bar(stat = "identity", position = "fill") +    
+    labs(x = "Cluster", y = "Percentage") +    
+    scale_y_continuous(labels = percent_format(accuracy = 1),  
+                       breaks = seq(0, 1, by = 0.25), limits = c(0, 1)) +  
+    theme_minimal() +  
+    theme(panel.grid.major = element_blank(),  
+          panel.grid.minor = element_blank(),  
+          panel.background = element_blank(),  
+          plot.background = element_rect(fill = "white"),  
+          text = element_text(color = "black"),  
+          axis.text = element_text(color = "black"),  
+          axis.title = element_text(size = 12),  
+          axis.ticks = element_line(color = "black"),  
+          axis.line = element_line(color = "black", size = 0.5),  
+          legend.text = element_text(color = "black"),  
+          plot.title = element_text(hjust = 0.5)) + 
+    ggtitle(p_value_text)  
+
+
+  if (col == "Therapy") {  
+    plot <- plot + scale_fill_manual(values = c("PD-1/PD-L1" = "#FCBB44",  
+                                                 "PD1" = "#CC6666",  
+                                                 "PD1/CTLA4" = "#6699CC"))  
+  } else if (col == "Antibiotics") {  
+    plot <- plot + scale_fill_manual(values = c("no" = "#CC6666", "yes" = "#6699CC"))  
+  } else if (col == "Host_sex") {  
+    plot <- plot + scale_fill_manual(values = c("Female" = "#CC6666", "Male" = "#6699CC"))  
+  } else if (col == "Age") {  
+    plot <- plot + scale_fill_manual(values = c("<65" = "#CC6666", ">=65" = "#6699CC"))  
+  }  
+
+  save_path <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result1/sFigure1/clinical"  
+  dir.create(save_path, recursive = TRUE, showWarnings = FALSE)  
+  ggsave(filename = file.path(save_path, paste0(col, "_plot.png")), plot = plot, width = 6, height = 8, units = "in")  
+  ggsave(filename = file.path(save_path, paste0(col, "_plot.pdf")), plot = plot, width = 6, height = 8, units = "in")  
+
+  rm(META_clean, col_summary, plot)  
+
+  cat("\n---\n")  
+}  
+
+META_clean_bmi <- na.omit(META)  
+
+META_clean_bmi$Cluster <- as.factor(META_clean_bmi$Cluster)  
+
+bmi_aov <- aov(BMI ~ Cluster, data = META_clean_bmi)  
+bmi_p_value <- summary(bmi_aov)[[1]][["Pr(>F)"]][1]  
+
+
+bmi_plot <- ggplot(META_clean_bmi, aes(x = Cluster, y = BMI, fill = Cluster)) +  
+  geom_boxplot(outlier.colour = NA) +   
+  scale_fill_manual(values = c("1" = "#CC6666", "2" = "#6699CC")) +  
+  scale_y_continuous(limits = c(20, 40)) +  
+  labs(x = "Cluster", y = "BMI",   
+       title = paste("P =", format(bmi_p_value, nsmall = 3, digits = 3))) +  # 
+  theme_minimal() +  
+  theme(panel.grid.major = element_blank(),  
+        panel.grid.minor = element_blank(),  
+        panel.background = element_blank(),  
+        plot.background = element_rect(fill = "white"),  
+        text = element_text(color = "black"),  
+        axis.text = element_text(color = "black"),  
+        axis.title = element_text(size = 12),  
+        axis.ticks = element_line(color = "black"),  
+        axis.line = element_line(color = "black", size = 0.5),  
+        legend.text = element_text(color = "black"),  
+        plot.title = element_text(hjust = 0.5))  
+
+ggsave(filename = file.path(save_path, "bmi_plot.png"), plot = bmi_plot, width = 6, height = 8, units = "in")  
+ggsave(filename = file.path(save_path, "bmi_plot.pdf"), plot = bmi_plot, width = 6, height = 8, units = "in")  
+
+rm(bmi_aov, bmi_p_value, bmi_plot)  
+```
+
+
+
+
+
+##survival information
+```{r pressure, echo=FALSE}
+library(survival)  
+library(survminer)  
+library(dplyr)  
+library(gridExtra)  
+library(cowplot)  
+library(tidyr)  
+
+save_path <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/rusult/result2/C"  
+dir.create(save_path, recursive = TRUE, showWarnings = FALSE)  
+
+META1 <- META %>%  
+  filter(!is.na(`OS_months.汇总.`), !is.na(Death_Event))    
+
+fit <- survfit(Surv(`OS_months.汇总.`, Death_Event) ~ Cluster, data = META1)  
+
+
+
+surv_plot_obj <- ggsurvplot(  
+  fit,  
+  xlab = "Time(Months)",  
+  pval = TRUE,  
+  conf.int = FALSE,  
+  risk.table = TRUE,  
+  surv.scale = "percent",  
+  palette = c("#990026", "#1e4e8a"),  
+  break.x.by = 12  
+)  
+
+pdf(file.path(save_path, "survival_C1andC2.pdf"), width = 8, height = 8)  
+print(surv_plot_obj)  
+dev.off()  
+
+png(file.path(save_path, "survival_C1andC2.png"), width = 8, height = 8, units = "in", res = 300)  
+print(surv_plot_obj)  
+dev.off()
+
+library(survival)
+library(survminer)
+library(dplyr)
+library(gridExtra)
+library(ggplot2)
+
+diseases <- c("NSCLC", "RCC", "Melanoma", "GS")
+
+
+for (disease in diseases) {
+ 
+  met_filtered <- META %>%
+    filter(Host_disease == disease) %>%
+    filter(!is.na(`OS_months.汇总.`) & !is.na(Death_Event)) %>%
+   
+    as.data.frame()
+
+
+  cat(paste("疾病:", disease, "样本量:", nrow(met_filtered), "\n"))
+
+  if (nrow(met_filtered) == 0) {
+    cat(paste("警告:", disease, "过滤后没有数据，跳过。\n"))
+    next # 如果没有数据，则跳过当前疾病
+  }
+
+
+  met_filtered <- met_filtered %>%
+    mutate(group = paste(Host_disease, "/C", Cluster, sep = ""))
+
+
+  fit <- survfit(Surv(`OS_months.汇总.`, Death_Event) ~ group, data = met_filtered)
+
+  my_palette <- c(
+    "#990026",   
+    "#1e4e8a"    
+  )
+
+
+  legend_labels <- paste0(disease, c("/C1", "/C2"))
+
+ 
+  surv_plot_obj <- ggsurvplot(
+    fit,
+    data = met_filtered,
+    xlab = "Time (Months)",
+    pval = TRUE,  
+    pval.coord = c(0, 0.2), 
+    conf.int = FALSE,
+    risk.table = TRUE,
+    surv.scale = "percent",
+    palette = my_palette,
+    break.x.by = 12,
+    font.main = c(16, "bold"),
+    font.x = c(14),
+    font.y = c(14),
+    font.legend = c(12),
+    legend.labs = legend_labels,
+    ggtheme = theme_minimal() +
+      theme(
+        panel.grid.major = element_line(color = "lightgray", linetype = "dashed"),
+        panel.grid.minor = element_line(color = "lightgray", linetype = "dotted"),
+        plot.background = element_rect(fill = "white", color = NA),
+        panel.border = element_blank()
+      ),
+    risk.table.ggtheme = theme_minimal() +
+      theme(
+        panel.grid.major = element_line(color = "lightgray", linetype = "dashed"),
+        panel.grid.minor = element_line(color = "lightgray", linetype = "dotted"),
+        plot.background = element_rect(fill = "white", color = NA),
+        panel.border = element_blank()
+      )
+  )
+
+
+  combined_plot <- grid.arrange(surv_plot_obj$plot, surv_plot_obj$table, nrow = 2, heights = c(0.7, 0.3))
+
+
+  save_path <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/maunscript/6.17一修/check_fig"
+  if (!dir.exists(save_path)) {
+    dir.create(save_path, recursive = TRUE)
+  }
+
+  png_filename <- paste0(save_path, "/", disease, "_survival_plot.png")
+  ggsave(png_filename, plot = combined_plot, width = 10, height = 8, dpi = 300)
+  cat(paste("PNG 文件成功保存到:", png_filename, "\n"))
+
+  pdf_filename <- paste0(save_path, "/", disease, "_survival_plot.pdf")
+  ggsave(pdf_filename, plot = combined_plot, width = 10, height = 8)
+  cat(paste("PDF 文件成功保存到:", pdf_filename, "\n"))
+}
+ 
+```
+
+
+
+
