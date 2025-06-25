@@ -765,14 +765,14 @@ ggsave(filename = "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分
        plot = ggplot_obj, width = 7, height = 5, units = "in")   
 ```
 
-##svm check
+##xgboost check
 ```{r pressure, echo=FALSE}
-# 加载必要的库
-library(openxlsx)
-library(e1071)  # e1071包提供了SVM功能
-library(pROC)
-library(ggplot2)
-library(caret)
+# 导入必要的库
+library(readxl)         # 用于读取Excel文件
+library(xgboost)       # 用于XGBoost模型
+library(pROC)          # 用于ROC曲线计算
+library(caret)         # 用于交叉验证和数据拆分
+library(ggplot2)       # 用于绘图
 
 # 导入模型结果
 machine_filename <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/maunscript/6.17一修/check_fig/machine/machine.xlsx"
@@ -791,23 +791,22 @@ species_list <- list(
   model_combined = unique(model_combined$species)
 )
 
-# 创建一个函数来进行5折交叉验证并计算ROC曲线
+# 创建一个函数来进行10折交叉验证并计算ROC曲线
 run_cross_validation <- function(data, selected_species, meta_data) {
   # 仅保留选定物种
   data_filtered <- data[rownames(data) %in% selected_species, , drop = FALSE]
   
   # 准备训练集和标签
   meta_filtered <- meta_data[rownames(meta_data) %in% colnames(data_filtered), "Cluster", drop = FALSE]
-
+  
   if (nrow(data_filtered) == 0 || nrow(meta_filtered) == 0) {
     stop("Filtered data or metadata is empty. Please check the selected species.")
   }
   
-  # 确保Cluster是因子，并转换为有效的名称
+  # 确保Cluster是因子
   meta_filtered$Cluster <- as.factor(meta_filtered$Cluster)
-  levels(meta_filtered$Cluster) <- make.names(levels(meta_filtered$Cluster))
-
-  # 5折交叉验证
+  
+  # 10折交叉验证
   folds <- createFolds(meta_filtered$Cluster, k = 10, list = TRUE)
   roc_data_combined <- list()  # 存储每折的ROC数据
   
@@ -815,36 +814,33 @@ run_cross_validation <- function(data, selected_species, meta_data) {
     # 划分训练集和测试集
     test_indices <- folds[[i]]
     train_indices <- setdiff(seq_len(nrow(meta_filtered)), test_indices)
-
-    # 在这里，训练SVM模型 - 不使用tuneGrid
-    svm_model <- train(
-      x = t(data_filtered[, train_indices]),  # 转置为行为特征
-      y = meta_filtered$Cluster[train_indices],
-      method = "svmRadial",  # 使用径向基核SVM
-      preProcess = c("center", "scale"),  # 预处理
-      trControl = trainControl(method = "none", classProbs = TRUE)  # 不进行交叉验证
+    
+    # 训练模型
+    dtrain <- xgb.DMatrix(data = t(data_filtered[, train_indices]), label = as.numeric(meta_filtered$Cluster[train_indices]) - 1)
+    dtest <- xgb.DMatrix(data = t(data_filtered[, test_indices]))
+    
+    params <- list(
+      objective = "binary:logistic", 
+      eval_metric = "logloss", 
+      nthread = 2
     )
     
-    # 进行预测，获取类概率
-    predictions <- predict(svm_model, newdata = t(data_filtered[, test_indices]), type = "prob")
+    xgb_model <- xgb.train(
+      params = params,
+      data = dtrain,
+      nrounds = 100
+    )
     
-    # 确保第二列是正类概率
-    if (is.null(predictions)) {
-      stop("Predictions are NULL. Please check the SVM model and data.")
-    }
-
-    # 计算类型
-    if (ncol(predictions) < 2) {
-      stop("Predictions do not contain enough classes for ROC calculation.")
-    }
+    # 进行预测
+    predictions <- predict(xgb_model, dtest)
     
     # 计算ROC曲线数据
-    roc_result <- roc(meta_filtered$Cluster[test_indices], predictions[, 2])  # 假设第二列是正类概率
+    roc_result <- roc(meta_filtered$Cluster[test_indices], predictions)
     roc_data_combined[[i]] <- data.frame(
       specificity = roc_result$specificities,
       sensitivity = roc_result$sensitivities,
       fold = i  # 添加折数
-    )
+    )  # 添加模型标识
   }
   
   return(roc_data_combined)
@@ -853,7 +849,7 @@ run_cross_validation <- function(data, selected_species, meta_data) {
 # 创建一个空的数据框来存储所有模型的ROC数据
 roc_data_combined_all <- data.frame()
 
-# 对每个模型进行5折交叉验证
+# 对每个模型进行10折交叉验证
 for (model_name in names(species_list)) {
   if (model_name == "model_a") {
     fold_rocs <- run_cross_validation(train_data_a, species_list$model_a, train_meta)
@@ -890,7 +886,7 @@ ggplot_obj <- ggplot(roc_data_combined_all, aes(x = 1 - specificity, y = sensiti
   geom_line(size = 1.2) +  # 绘制各模型的曲线  
   geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +  
   labs(x = "1 - Specificity (False Positive Rate)", y = "Sensitivity (True Positive Rate)", 
-       title = "Average ROC Curves for SVM Models with 5-Fold Cross-Validation") +  
+       title = "Average ROC Curves for XGBoost Models with 10-Fold Cross-Validation") +  
   theme_minimal() +  
   theme(panel.grid.major = element_line(color = "lightgray"),   
         panel.grid.minor = element_line(color = "lightgray"),   
@@ -906,13 +902,9 @@ ggplot_obj <- ggplot(roc_data_combined_all, aes(x = 1 - specificity, y = sensiti
 # 保存图形为PNG和PDF格式  
 output_dir <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/maunscript/6.17一修/check_fig/machine"
 
-ggsave(filename = file.path(output_dir, "roc_svm_check.png"),   
-       plot = ggplot_obj, width = 7, height = 5, units = "in")  
-
-ggsave(filename = file.path(output_dir, "roc_svm_check.pdf"),   
-       plot = ggplot_obj, width = 7, height = 5, units = "in")  
+ggsave(filename = file.path(output_dir, "roc_xgboost_check.tiff"),   
+       plot = ggplot_obj, width = 7, height = 5, units = "in", dpi = 300)  
 ```
-
 ##svm
 ```{r pressure, echo=FALSE}
 library(e1071)        # 支持向量机的包  
