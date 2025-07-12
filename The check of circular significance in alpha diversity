@@ -1,0 +1,171 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r pressure, echo=FALSE}
+library(vegan)
+library(dplyr)
+library(tibble)
+META_check <- read.csv("/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/Raw/META_check.csv",header = TRUE, sep = ',', row.names = 1)  
+META_check <- META_check %>% 
+  tibble::rownames_to_column("Sample")
+#计算每个样本的 Shannon 指数
+shannon_vec <- data.frame(
+  Sample  = colnames(s),                          # 样本名（与 META_check 行名一致）
+  Shannon = diversity(s, index = "shannon")    # 每个样本的 Shannon
+)
+
+META_check <- dplyr::left_join(META_check, shannon_vec, by = "Sample")
+#真实标签 t 检验 
+real_shannon <- t.test(shannon ~ Cluster, data = META_check)$p.value
+
+#置换检验（9999 次） 
+set.seed(123)
+perm_p <- replicate(9999, {
+  perm_clus <- sample(META_check$Cluster)
+  t.test(shannon ~ perm_clus, data = META_check)$p.value
+})
+
+empirical_p <- (sum(perm_p <= real_shannon) + 1) / (9999 + 1)
+
+cat("真实 p =", real_shannon,
+    "置换 p =", empirical_p, "\n")
+#真实 p = 5.005583e-09 置换 p = 1e-04 
+
+# 1) 计算每个样本的 Observed Species（物种丰富度）
+obs_vec <- data.frame(
+  Sample  = colnames(s),                      # 与 META_check 行名一致
+  Observed = specnumber(t(s))                    # 物种数
+)
+
+
+META_check <- dplyr::left_join(META_check, obs_vec, by = "Sample")
+
+# 3) 真实标签 t 检验
+
+real_obs <- t.test(Observed ~ Cluster, data = META_check)$p.value
+
+
+# 4) 置换检验（9999 次）
+
+set.seed(123)
+perm_p_obs <- replicate(9999, {
+  perm_clus <- sample(META_check$Cluster)
+  t.test(Observed ~ perm_clus, data = META_check)$p.value
+})
+
+empirical_p_obs <- (sum(perm_p_obs <= real_obs) + 1) / (9999 + 1)
+
+# 5) 结果输出
+cat("Observed Species:\n")
+cat("  真实 p =", real_obs,
+    "置换 p =", empirical_p_obs, "\n")
+#真实 p = 4.045116e-12 置换 p = 1e-04 
+
+
+# 整理置换结果
+perm_tbl <- tibble(
+  Metric = c(rep("Shannon", length(perm_p)), rep("Observed", length(perm_p_obs))),
+  p_perm = c(perm_p, perm_p_obs)
+)
+
+# 绘图
+p_plot <- ggplot(perm_tbl, aes(x = Metric, y = p_perm, fill = Metric)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA, width = 0.6) +
+  geom_jitter(width = 0.25, alpha = 0.4, size = 1.2, aes(color = Metric)) +
+  scale_fill_manual(values = c("Shannon" = "#990026", "Observed" = "#1e4e8a")) +
+  scale_color_manual(values = c("Shannon" = "#990026", "Observed" = "#1e4e8a")) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+  labs(x = NULL, y = "Permutation Test P-Value Distribution") +
+  theme_bw(base_size = 14) +
+  theme(panel.grid = element_blank(), legend.position = "none")
+
+# 保存
+save_path <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/maunscript/6.17一修/check_fig/alpha diversity stability"
+ggsave(file.path(save_path, "p_values_boxplot_clean.pdf"), p_plot, width = 10, height = 6)
+ggsave(file.path(save_path, "p_values_boxplot_clean.tif"),  p_plot, device = tiff,
+       width = 10, height = 6, dpi = 300, compression = "lzw")
+
+library(dplyr)
+library(ggplot2)
+
+## 1. 创建不修改原数据的新数据框 -----------------------------------------------
+META_clean <- META_check %>%
+  mutate(Response = recode(Response,
+                           `Responder`     = "R",
+                           `Non_Responder` = "NR"))
+
+## 2. 颜色向量 -----------------------------------------------------------------
+response_colors <- c("C1/R" = "#990026", "C1/NR" = "#CC6666",
+                     "C2/R" = "#1e4e8a", "C2/NR" = "#6699CC")
+
+## 3. 整理分组统计 -------------------------------------------------------------
+response_summary <- META_clean %>%
+  dplyr::filter(!is.na(Response)) %>%
+  dplyr::mutate(
+    Group = dplyr::recode(
+      paste0("C", Cluster, "/", Response),
+      `C1/R`  = "C1/R",
+      `C1/NR` = "C1/NR",
+      `C2/R`  = "C2/R",
+      `C2/NR` = "C2/NR"
+    )
+  ) %>%
+  dplyr::filter(!is.na(Group)) %>%
+  dplyr::group_by(Cluster, Group) %>%
+  dplyr::summarise(count = dplyr::n(), .groups = "drop") %>%
+  dplyr::group_by(Cluster) %>%
+  dplyr::mutate(percentage = count / sum(count))
+## 4. 构建列联表并进行卡方检验 --------------------------------------------------
+contingency_table <- table(META_check$Cluster,
+                           factor(ifelse(META_check$Response == "Responder", "R", "NR"),
+                                  levels = c("R", "NR")))
+
+chi_test_response <- chisq.test(contingency_table, correct = FALSE)  # 卡方检验
+
+## 5. 格式化 p 值 --------------------------------------------------------------
+p_val <- chi_test_response$p.value
+p_value_text_response <- case_when(
+  p_val < 0.001 ~ "P < 0.001",
+  p_val < 0.01  ~ "P < 0.01",
+  p_val < 0.05  ~ "P < 0.05",
+  TRUE          ~ paste("P =", format(p_val, digits = 3, nsmall = 3))
+)
+
+## 6. 绘图 ----------------------------------------------------------------------
+response_plot <- ggplot(response_summary,
+                        aes(x = factor(Cluster), y = percentage, fill = Group)) +
+  geom_col(position = "fill", width = 0.7) +
+  scale_fill_manual(values = response_colors) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                     limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+  labs(x = "Cluster", y = "Percentage", fill = "Response") +
+  ggtitle(bquote(italic(.(p_value_text_response)))) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title     = element_text(hjust = 0.5, face = "italic"),
+    panel.grid     = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    text           = element_text(color = "black"),
+    axis.text      = element_text(color = "black"),
+    axis.ticks     = element_line(color = "black"),
+    axis.line      = element_line(color = "black")
+  )
+
+## 7. 打印结果并显示图 ----------------------------------------------------------
+cat("\n---\n卡方检验结果（Cluster vs Response）：\n")
+print(chi_test_response)
+
+print(response_plot)
+
+out_dir <- "/Users/qiaotong2023/Desktop/qt/科研/课题/课题1. Meta分析微生物多界互作网络对癌症免疫治疗的意义/maunscript/6.17一修/check_fig/alpha diversity stability"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+pdf(file.path(out_dir, "alpha_circularcheck.pdf"),
+    width = 8,      # 宽（英寸）
+    height = 6) 
+print(response_plot)   # 若 response_plot 是 ggplot 对象
+dev.off()
+```
